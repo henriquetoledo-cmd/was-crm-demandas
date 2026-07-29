@@ -13,12 +13,22 @@
 
 <script>
 const STATUS_LABELS = {
-  backlog: 'Backlog',
-  em_producao: 'Em produção',
-  revisao_interna: 'Revisão interna',
-  aprovacao_cliente: 'Aguardando sua aprovação',
+  em_briefing: 'Em briefing',
+  aprovacao_briefing: 'Aguardando aprovação do briefing',
+  aguardando_infos: 'Aguardando infos/materiais',
+  aguardando_captacao: 'Aguardando captação',
+  a_fazer_design: 'A fazer - Design',
+  em_criacao_design: 'Em criação (design)',
+  em_ajuste_design: 'Em ajuste (design)',
+  pronto_envio_design: 'Pronto para envio (design)',
+  em_aprovacao_cliente: 'Aguardando sua aprovação',
+  freela: 'Freela',
   aprovado: 'Aprovado',
-  publicado: 'Publicado',
+  postar: 'Postar',
+  programado: 'Programado',
+  postado: 'Postado',
+  stand_by: 'Stand By',
+  nao_utilizado: 'Não utilizado',
 };
 
 function escapeHtml(str) {
@@ -70,7 +80,7 @@ async function init() {
                   <div class="client-card">
                     <div>
                       <div class="name">${escapeHtml(d.title)}</div>
-                      <div class="meta">${d.description ? escapeHtml(d.description) + ' · ' : ''}${d.due_date ? 'prazo: ' + d.due_date : ''}</div>
+                      <div class="meta">${(d.format || []).join(', ')}${d.description ? ' · ' + escapeHtml(d.description) : ''}${d.prazo_final ? ' · prazo: ' + d.prazo_final : ''}</div>
                     </div>
                     ${d.link ? `<a href="${escapeHtml(d.link)}" target="_blank" class="btn small secondary">Abrir</a>` : ''}
                   </div>

@@ -1,21 +1,88 @@
+// ---------- Configuração (fluxo WAS + espelha a base ENTREGAS DESIGN - WAS do Notion) ----------
+const STAGES = [
+  { key: 1, label: '1 · Briefing (Social Media)' },
+  { key: 2, label: '2 · Aprovação do cliente' },
+  { key: 3, label: '3 · Captação e execução (equipe)' },
+  { key: 4, label: '4 · Aprovação do cliente' },
+  { key: 5, label: '5 · Programar posts' },
+  { key: 0, label: 'Outros' },
+];
+
+const STATUS_DEFS = [
+  { key: 'em_briefing', label: 'Em briefing', color: 'yellow', stage: 1 },
+  { key: 'aprovacao_briefing', label: 'Aprovação do briefing', color: 'green', stage: 2 },
+  { key: 'aguardando_captacao', label: 'Aguardando captação', color: 'red', stage: 3 },
+  { key: 'a_fazer_design', label: 'A fazer - Design', color: 'brown', stage: 3 },
+  { key: 'em_criacao_design', label: 'Em criação (design)', color: 'yellow', stage: 3 },
+  { key: 'em_ajuste_design', label: 'Em ajuste (design)', color: 'orange', stage: 3 },
+  { key: 'pronto_envio_design', label: 'Pronto para envio (design)', color: 'pink', stage: 3 },
+  { key: 'em_aprovacao_cliente', label: 'Em aprovação (cliente)', color: 'green', stage: 4 },
+  { key: 'aprovado', label: 'Aprovado', color: 'green', stage: 4 },
+  { key: 'postar', label: 'Postar', color: 'blue', stage: 5 },
+  { key: 'programado', label: 'Programado', color: 'purple', stage: 5 },
+  { key: 'postado', label: 'Postado', color: 'purple', stage: 5 },
+  { key: 'aguardando_infos', label: 'Aguardando infos/materiais', color: 'gray', stage: 0 },
+  { key: 'freela', label: 'Freela', color: 'gray', stage: 0 },
+  { key: 'stand_by', label: 'Stand By', color: 'gray', stage: 0 },
+  { key: 'nao_utilizado', label: 'Não utilizado', color: 'default', stage: 0 },
+];
+
+const DONE_STATUSES = ['aprovado', 'postar', 'programado', 'postado', 'stand_by', 'nao_utilizado'];
+
+const FORMATO_OPTIONS = [
+  { name: 'Feed', color: 'green' }, { name: 'Story', color: 'green' }, { name: 'Estático', color: 'green' },
+  { name: 'Carrossel', color: 'green' }, { name: 'Reels', color: 'green' }, { name: 'Vídeo', color: 'green' },
+  { name: 'GIF / Motion', color: 'green' },
+  { name: 'Cardápio', color: 'gray' }, { name: 'Cartaz', color: 'gray' }, { name: 'Backdrop', color: 'gray' },
+  { name: 'Faixa', color: 'gray' }, { name: 'Flyer', color: 'gray' }, { name: 'Banner', color: 'gray' },
+  { name: 'Adesivo', color: 'gray' }, { name: 'Totem', color: 'gray' }, { name: 'Brindes', color: 'gray' },
+  { name: 'Apresentação', color: 'purple' }, { name: 'Moodboard', color: 'purple' }, { name: 'Identidade visual', color: 'purple' },
+];
+
+const PLATAFORMA_OPTIONS = [
+  { name: 'Instagram', color: 'pink' }, { name: 'TikTok', color: 'brown' }, { name: 'LinkedIn', color: 'default' },
+  { name: 'Facebook', color: 'blue' }, { name: 'Ads', color: 'yellow' }, { name: 'Site', color: 'orange' },
+  { name: 'Off (físico/impresso)', color: 'gray' }, { name: 'Cliente', color: 'red' }, { name: 'YouTube', color: 'red' },
+];
+
+const PRIORIDADE_OPTIONS = [
+  { key: 'normal', label: 'Normal', color: 'green' },
+  { key: 'alta', label: 'Alta', color: 'orange' },
+  { key: 'urgente', label: 'Urgente', color: 'red' },
+];
+
+const FORECAST_OPTIONS = [
+  { key: 'prevista', label: 'Prevista', color: 'green' },
+  { key: 'nao_prevista', label: 'Não prevista', color: 'red' },
+];
+
+const REFACAO_OPTIONS = [
+  { key: '', label: '—', color: 'gray' },
+  { key: 'v1', label: 'V1', color: 'blue' },
+  { key: 'v2', label: 'V2', color: 'purple' },
+  { key: 'v3', label: 'V3', color: 'pink' },
+  { key: 'v4', label: 'V4', color: 'orange' },
+  { key: 'v5', label: 'V5', color: 'red' },
+  { key: 'v6', label: 'V6', color: 'gray' },
+];
+
+function statusDef(key) { return STATUS_DEFS.find((s) => s.key === key) || STATUS_DEFS[0]; }
+
 // ---------- Estado ----------
 const state = {
   page: 'dashboard',
   clients: [],
   demands: [],
   strategies: [],
+  pages: [],
   demandClientFilter: '',
+  demandRespFilter: '',
+  demandPriorityFilter: '',
   stratClientFilter: '',
+  currentClientId: null,
+  currentPageId: null,
+  expandedFolders: new Set(),
 };
-
-const STATUS_COLS = [
-  { key: 'backlog', label: 'Backlog' },
-  { key: 'em_producao', label: 'Em produção' },
-  { key: 'revisao_interna', label: 'Revisão interna' },
-  { key: 'aprovacao_cliente', label: 'Aprovação cliente' },
-  { key: 'aprovado', label: 'Aprovado' },
-  { key: 'publicado', label: 'Publicado' },
-];
 
 // ---------- API helpers ----------
 async function api(path, opts) {
@@ -41,9 +108,16 @@ async function loadAll() {
   state.strategies = strategies;
 }
 
+function clientById(id) {
+  return state.clients.find((c) => c.id === id);
+}
 function clientName(id) {
-  const c = state.clients.find((c) => c.id === id);
+  const c = clientById(id);
   return c ? c.name : '—';
+}
+function clientColor(id) {
+  const c = clientById(id);
+  return c && c.color ? c.color : 'default';
 }
 
 // ---------- Navegação ----------
@@ -52,6 +126,7 @@ document.querySelectorAll('.nav-item').forEach((el) => {
     document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
     el.classList.add('active');
     state.page = el.dataset.page;
+    state.currentClientId = null;
     render();
   });
 });
@@ -60,6 +135,7 @@ function render() {
   const main = document.getElementById('main');
   if (state.page === 'dashboard') return renderDashboard(main);
   if (state.page === 'clientes') return renderClientes(main);
+  if (state.page === 'cliente-detail') return renderClienteDetail(main);
   if (state.page === 'demandas') return renderDemandas(main);
   if (state.page === 'estrategia') return renderEstrategia(main);
 }
@@ -68,8 +144,8 @@ function render() {
 function renderDashboard(main) {
   const totalClients = state.clients.filter((c) => c.status === 'ativo').length;
   const totalDemands = state.demands.length;
-  const overdue = state.demands.filter((d) => d.due_date && d.due_date < todayStr() && d.status !== 'publicado').length;
-  const waitingClient = state.demands.filter((d) => d.status === 'aprovacao_cliente').length;
+  const overdue = state.demands.filter((d) => d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status)).length;
+  const waitingClient = state.demands.filter((d) => d.status === 'em_aprovacao_cliente' || d.status === 'aprovacao_briefing').length;
 
   const recentDemands = [...state.demands]
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
@@ -90,15 +166,18 @@ function renderDashboard(main) {
     </div>
     <div class="page-header"><h1 style="font-size:16px">Últimas demandas</h1></div>
     <div class="card-list">
-      ${recentDemands.length ? recentDemands.map((d) => `
+      ${recentDemands.length ? recentDemands.map((d) => {
+        const sd = statusDef(d.status);
+        return `
         <div class="client-card">
           <div>
             <div class="name">${escapeHtml(d.title)}</div>
-            <div class="meta">${escapeHtml(clientName(d.client_id))} · vence ${d.due_date || 'sem data'}</div>
+            <div class="meta"><span class="tag tag-${clientColor(d.client_id)}">${escapeHtml(clientName(d.client_id))}</span> · vence ${d.prazo_final || 'sem data'}</div>
           </div>
-          <span class="badge ${d.status === 'publicado' ? 'ativo' : 'prospect'}">${STATUS_COLS.find((s) => s.key === d.status)?.label || d.status}</span>
+          <span class="tag tag-${sd.color}">${sd.label}</span>
         </div>
-      `).join('') : '<div class="empty-state">Nenhuma demanda cadastrada ainda.</div>'}
+      `;
+      }).join('') : '<div class="empty-state">Nenhuma demanda cadastrada ainda.</div>'}
     </div>
   `;
 }
@@ -134,23 +213,37 @@ function renderClientes(main) {
     return `
     <div class="client-card">
       <div>
-        <div class="name">${escapeHtml(c.name)} <span class="badge ${c.status}">${c.status}</span></div>
+        <div class="name">
+          <span class="tag tag-${c.color || 'default'}">${escapeHtml(c.name)}</span>
+          <span class="badge ${c.status}">${c.status}</span>
+        </div>
         <div class="meta">${escapeHtml(c.segment || '—')} · ${escapeHtml(c.contact_name || '')} ${c.contact_email ? '· ' + escapeHtml(c.contact_email) : ''}</div>
         <div class="copy-link" style="margin-top:6px">Portal: <code>${portalUrl}</code> <a href="#" data-copy="${portalUrl}">copiar</a></div>
       </div>
       <div class="actions">
+        <button class="btn small" data-open="${c.id}">Abrir</button>
         <button class="btn secondary small" data-edit="${c.id}">Editar</button>
         <button class="btn danger small" data-del="${c.id}">Excluir</button>
       </div>
     </div>`;
   }).join('');
 
+  list.querySelectorAll('[data-open]').forEach((btn) => {
+    btn.onclick = async () => {
+      state.currentClientId = btn.dataset.open;
+      state.currentPageId = null;
+      state.page = 'cliente-detail';
+      document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
+      state.pages = await api('/pages?client_id=' + state.currentClientId);
+      render();
+    };
+  });
   list.querySelectorAll('[data-edit]').forEach((btn) => {
     btn.onclick = () => openClientModal(state.clients.find((c) => c.id === btn.dataset.edit));
   });
   list.querySelectorAll('[data-del]').forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm('Excluir este cliente e todas as demandas/estratégias vinculadas?')) return;
+      if (!confirm('Excluir este cliente e todas as demandas/estratégias/páginas vinculadas?')) return;
       await api('/clients/' + btn.dataset.del, { method: 'DELETE' });
       await loadAll();
       render();
@@ -209,13 +302,208 @@ function openClientModal(client) {
   };
 }
 
-// ---------- Demandas ----------
+// ---------- Workspace do cliente (páginas/pastas estilo Notion) ----------
+function buildPageTree(pages, parentId) {
+  return pages
+    .filter((p) => p.parent_id === parentId)
+    .sort((a, b) => (a.order || 0) - (b.order || 0))
+    .map((p) => ({ ...p, children: buildPageTree(pages, p.id) }));
+}
+
+function renderPageTreeNodes(nodes, depth) {
+  return nodes.map((n) => {
+    const isFolder = n.type === 'folder';
+    const isOpen = state.expandedFolders.has(n.id);
+    const isActive = state.currentPageId === n.id;
+    let html = `
+      <div class="page-tree-item ${isActive ? 'active' : ''}" data-id="${n.id}" data-type="${n.type}" style="padding-left:${10 + depth * 16}px">
+        <span class="ptree-icon">${isFolder ? (isOpen ? '📂' : '📁') : '📄'}</span>
+        <span class="ptree-title">${escapeHtml(n.title)}</span>
+      </div>
+    `;
+    if (isFolder && isOpen && n.children.length) {
+      html += renderPageTreeNodes(n.children, depth + 1);
+    }
+    return html;
+  }).join('');
+}
+
+function renderClienteDetail(main) {
+  const client = clientById(state.currentClientId);
+  if (!client) {
+    state.page = 'clientes';
+    return renderClientes(main);
+  }
+  const tree = buildPageTree(state.pages, null);
+  const currentPage = state.pages.find((p) => p.id === state.currentPageId);
+  const folderOptions = [{ id: '', title: 'Raiz (sem pasta)' }, ...state.pages.filter((p) => p.type === 'folder').map((p) => ({ id: p.id, title: p.title }))];
+
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <a href="#" id="back-to-clients" style="font-size:12px;color:var(--text-dim)">&larr; Voltar para Clientes</a>
+        <h1 style="margin-top:6px"><span class="tag tag-${client.color || 'default'}">${escapeHtml(client.name)}</span></h1>
+        <p>Workspace do cliente — páginas, calendário, planejamento e acessos</p>
+      </div>
+    </div>
+    <div class="client-workspace">
+      <div class="ptree-panel">
+        <div class="ptree-new">
+          <input type="text" id="new-page-title" placeholder="Nome da nova página/pasta" />
+          <select id="new-page-parent">
+            ${folderOptions.map((f) => `<option value="${f.id}">${escapeHtml(f.title)}</option>`).join('')}
+          </select>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button class="btn secondary small" id="btn-new-page" style="flex:1">+ Página</button>
+            <button class="btn secondary small" id="btn-new-folder" style="flex:1">+ Pasta</button>
+          </div>
+        </div>
+        <div class="ptree-list" id="ptree-list">
+          ${tree.length ? renderPageTreeNodes(tree, 0) : '<div class="empty-state" style="padding:16px">Nenhuma página ainda.</div>'}
+        </div>
+      </div>
+      <div class="page-editor" id="page-editor"></div>
+    </div>
+  `;
+
+  document.getElementById('back-to-clients').onclick = (e) => {
+    e.preventDefault();
+    state.page = 'clientes';
+    state.currentClientId = null;
+    render();
+  };
+
+  document.getElementById('btn-new-page').onclick = () => createPage('page');
+  document.getElementById('btn-new-folder').onclick = () => createPage('folder');
+
+  document.querySelectorAll('.page-tree-item').forEach((el) => {
+    el.onclick = () => {
+      const id = el.dataset.id;
+      const type = el.dataset.type;
+      if (type === 'folder') {
+        if (state.expandedFolders.has(id)) state.expandedFolders.delete(id);
+        else state.expandedFolders.add(id);
+        state.currentPageId = id;
+      } else {
+        state.currentPageId = id;
+      }
+      renderClienteDetail(main);
+    };
+  });
+
+  renderPageEditor(currentPage);
+}
+
+async function createPage(type) {
+  const title = document.getElementById('new-page-title').value.trim();
+  const parentId = document.getElementById('new-page-parent').value || null;
+  if (!title) return alert('Dê um nome para a página/pasta.');
+  const page = await api('/pages', {
+    method: 'POST',
+    body: JSON.stringify({ client_id: state.currentClientId, parent_id: parentId, type, title }),
+  });
+  state.pages = await api('/pages?client_id=' + state.currentClientId);
+  if (parentId) state.expandedFolders.add(parentId);
+  state.currentPageId = page.id;
+  render();
+}
+
+function renderPageEditor(page) {
+  const editor = document.getElementById('page-editor');
+  if (!editor) return;
+  if (!page) {
+    editor.innerHTML = '<div class="empty-state">Selecione uma página à esquerda, ou crie uma nova.</div>';
+    return;
+  }
+  if (page.type === 'folder') {
+    const childCount = state.pages.filter((p) => p.parent_id === page.id).length;
+    editor.innerHTML = `
+      <div class="editor-toolbar">
+        <input type="text" id="page-title-input" value="${escapeHtml(page.title)}" />
+        <button class="btn danger small" id="btn-del-page">Excluir pasta</button>
+      </div>
+      <div class="empty-state">📁 Esta é uma pasta com ${childCount} item(ns) dentro. Crie páginas e selecione esta pasta como destino no painel à esquerda.</div>
+    `;
+    document.getElementById('page-title-input').onblur = (e) => savePageTitle(page, e.target.value);
+    document.getElementById('btn-del-page').onclick = () => deletePage(page);
+    return;
+  }
+
+  editor.innerHTML = `
+    <div class="editor-toolbar">
+      <input type="text" id="page-title-input" value="${escapeHtml(page.title)}" />
+      <div class="rt-buttons">
+        <button type="button" data-cmd="bold"><b>B</b></button>
+        <button type="button" data-cmd="italic"><i>I</i></button>
+        <button type="button" data-cmd="underline"><u>U</u></button>
+        <button type="button" data-cmd="formatBlock" data-val="H2">H2</button>
+        <button type="button" data-cmd="formatBlock" data-val="H3">H3</button>
+        <button type="button" data-cmd="insertUnorderedList">• Lista</button>
+        <button type="button" data-cmd="insertOrderedList">1. Lista</button>
+        <button type="button" data-cmd="createLink">Link</button>
+      </div>
+      <div style="flex:1"></div>
+      <button class="btn small" id="btn-save-page">Salvar</button>
+      <button class="btn danger small" id="btn-del-page">Excluir</button>
+    </div>
+    <div class="page-content" id="page-content" contenteditable="true">${page.content || ''}</div>
+    <div class="editor-status" id="editor-status"></div>
+  `;
+
+  const contentEl = document.getElementById('page-content');
+  editor.querySelectorAll('.rt-buttons button').forEach((btn) => {
+    btn.onclick = () => {
+      contentEl.focus();
+      const cmd = btn.dataset.cmd;
+      if (cmd === 'createLink') {
+        const url = prompt('URL do link:');
+        if (url) document.execCommand('createLink', false, url);
+      } else if (cmd === 'formatBlock') {
+        document.execCommand('formatBlock', false, btn.dataset.val);
+      } else {
+        document.execCommand(cmd, false, null);
+      }
+    };
+  });
+
+  document.getElementById('btn-save-page').onclick = () => savePageContent(page, contentEl.innerHTML, document.getElementById('page-title-input').value);
+  document.getElementById('page-title-input').onblur = (e) => savePageTitle(page, e.target.value);
+  document.getElementById('btn-del-page').onclick = () => deletePage(page);
+}
+
+async function savePageContent(page, content, title) {
+  await api('/pages/' + page.id, { method: 'PUT', body: JSON.stringify({ content, title }) });
+  state.pages = await api('/pages?client_id=' + state.currentClientId);
+  const status = document.getElementById('editor-status');
+  if (status) {
+    status.textContent = 'Salvo ✓';
+    setTimeout(() => { if (status) status.textContent = ''; }, 1500);
+  }
+}
+
+async function savePageTitle(page, title) {
+  if (!title.trim() || title === page.title) return;
+  await api('/pages/' + page.id, { method: 'PUT', body: JSON.stringify({ title: title.trim() }) });
+  state.pages = await api('/pages?client_id=' + state.currentClientId);
+}
+
+async function deletePage(page) {
+  if (!confirm(`Excluir "${page.title}"${page.type === 'folder' ? ' e tudo que estiver dentro dela' : ''}?`)) return;
+  await api('/pages/' + page.id, { method: 'DELETE' });
+  state.pages = await api('/pages?client_id=' + state.currentClientId);
+  state.currentPageId = null;
+  render();
+}
+
+// ---------- Demandas (Kanban vivo — fluxo WAS) ----------
 function renderDemandas(main) {
+  const responsibles = Array.from(new Set(state.demands.map((d) => d.responsible).filter(Boolean))).sort();
+
   main.innerHTML = `
     <div class="page-header">
       <div>
         <h1>Demandas</h1>
-        <p>Pipeline de entregas por status</p>
+        <p>Pipeline de entregas por status — ${state.demands.length} no total</p>
       </div>
       <button class="btn" id="btn-new-demand">+ Nova demanda</button>
     </div>
@@ -224,77 +512,202 @@ function renderDemandas(main) {
         <option value="">Todos os clientes</option>
         ${state.clients.map((c) => `<option value="${c.id}" ${state.demandClientFilter === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
       </select>
+      <select id="filter-resp">
+        <option value="">Todos os responsáveis</option>
+        ${responsibles.map((r) => `<option value="${escapeHtml(r)}" ${state.demandRespFilter === r ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}
+      </select>
+      <select id="filter-priority">
+        <option value="">Todas as prioridades</option>
+        ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${state.demandPriorityFilter === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+      </select>
     </div>
     <div class="kanban" id="kanban"></div>
   `;
   document.getElementById('btn-new-demand').onclick = () => openDemandModal();
-  document.getElementById('filter-client').onchange = (e) => {
-    state.demandClientFilter = e.target.value;
-    renderDemandas(main);
-  };
+  document.getElementById('filter-client').onchange = (e) => { state.demandClientFilter = e.target.value; renderDemandas(main); };
+  document.getElementById('filter-resp').onchange = (e) => { state.demandRespFilter = e.target.value; renderDemandas(main); };
+  document.getElementById('filter-priority').onchange = (e) => { state.demandPriorityFilter = e.target.value; renderDemandas(main); };
 
-  const filtered = state.demandClientFilter
-    ? state.demands.filter((d) => d.client_id === state.demandClientFilter)
-    : state.demands;
+  let filtered = state.demands;
+  if (state.demandClientFilter) filtered = filtered.filter((d) => d.client_id === state.demandClientFilter);
+  if (state.demandRespFilter) filtered = filtered.filter((d) => d.responsible === state.demandRespFilter);
+  if (state.demandPriorityFilter) filtered = filtered.filter((d) => d.priority === state.demandPriorityFilter);
 
   const kanban = document.getElementById('kanban');
-  kanban.innerHTML = STATUS_COLS.map((col) => {
-    const items = filtered.filter((d) => d.status === col.key);
+  kanban.innerHTML = STAGES.map((stage) => {
+    const cols = STATUS_DEFS.filter((s) => s.stage === stage.key);
     return `
-      <div class="kanban-col">
-        <h3>${col.label} <span class="count">${items.length}</span></h3>
-        ${items.map((d) => `
-          <div class="demand-card" data-id="${d.id}">
-            <div class="title">${escapeHtml(d.title)}</div>
-            <div class="sub">
-              <span><span class="priority-dot priority-${d.priority}"></span>${escapeHtml(clientName(d.client_id))}</span>
-              <span>${d.due_date || ''}</span>
-            </div>
-          </div>
-        `).join('')}
+      <div class="stage-group">
+        <div class="stage-label">${stage.label}</div>
+        <div class="stage-cols">
+          ${cols.map((col) => {
+            const items = filtered.filter((d) => d.status === col.key);
+            return `
+              <div class="kanban-col" data-status="${col.key}">
+                <div class="col-head">
+                  <span class="col-dot tag-${col.color}" style="background:currentColor"></span>
+                  <h3>${col.label}</h3>
+                  <span class="count">${items.length}</span>
+                </div>
+                <div class="col-body" data-status="${col.key}">
+                  ${items.map((d) => renderDemandCard(d)).join('')}
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
       </div>
     `;
   }).join('');
 
   kanban.querySelectorAll('.demand-card').forEach((el) => {
     el.onclick = () => openDemandModal(state.demands.find((d) => d.id === el.dataset.id));
+    el.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', el.dataset.id);
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => el.classList.remove('dragging'));
   });
+
+  kanban.querySelectorAll('.col-body').forEach((col) => {
+    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const demandId = e.dataTransfer.getData('text/plain');
+      const newStatus = col.dataset.status;
+      const demand = state.demands.find((d) => d.id === demandId);
+      if (!demand || demand.status === newStatus) return;
+      demand.status = newStatus; // atualização otimista
+      renderDemandas(main);
+      await api('/demands/' + demandId, { method: 'PUT', body: JSON.stringify({ status: newStatus }) });
+    });
+  });
+}
+
+function renderDemandCard(d) {
+  const tags = [
+    ...(d.format || []).map((f) => `<span class="tag tag-${(FORMATO_OPTIONS.find((o) => o.name === f) || {}).color || 'gray'}">${escapeHtml(f)}</span>`),
+    ...(d.platform || []).map((p) => `<span class="tag tag-${(PLATAFORMA_OPTIONS.find((o) => o.name === p) || {}).color || 'gray'}">${escapeHtml(p)}</span>`),
+  ].join('');
+  let captureBadge;
+  if (d.needs_capture === false) {
+    captureBadge = '<span class="tag tag-gray">sem captação</span>';
+  } else if (d.capture_date) {
+    captureBadge = `<span class="tag tag-orange">🎬 ${d.capture_date}</span>`;
+  } else {
+    captureBadge = '<span class="tag tag-default">captação a definir</span>';
+  }
+  return `
+    <div class="demand-card" data-id="${d.id}" draggable="true">
+      <div class="title">${escapeHtml(d.title)}</div>
+      ${tags ? `<div class="tag-group">${tags}</div>` : ''}
+      <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}</div>
+      <div class="sub">
+        <span><span class="priority-dot ${d.priority}"></span>${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</span>
+        <span>${d.prazo_final || d.prazo_designer || ''}</span>
+      </div>
+    </div>
+  `;
 }
 
 function openDemandModal(demand) {
   const isEdit = !!demand;
   demand = demand || {
     client_id: state.demandClientFilter || (state.clients[0] ? state.clients[0].id : ''),
-    title: '', description: '', type: 'post', status: 'backlog',
-    due_date: '', responsible: '', priority: 'media', visible_to_client: false, link: '',
+    title: '', description: '', briefing: '', format: [], platform: [], status: 'em_briefing',
+    needs_capture: true, capture_date: '',
+    prazo_designer: '', prazo_final: '', responsible: '', priority: 'normal',
+    forecast: 'prevista', refacao: '', visible_to_client: false, link: '',
   };
   if (!state.clients.length) return alert('Cadastre um cliente antes de criar demandas.');
   showModal(`
     <h2>${isEdit ? 'Editar demanda' : 'Nova demanda'}</h2>
-    <label>Cliente</label>
+    <label>Projeto / Cliente</label>
     <select id="f-client" style="width:100%">
       ${state.clients.map((c) => `<option value="${c.id}" ${demand.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
     </select>
-    <label>Título</label>
+    <label>Demanda</label>
     <input type="text" id="f-title" value="${escapeHtml(demand.title)}" style="width:100%" />
-    <label>Descrição</label>
-    <textarea id="f-desc" style="min-height:70px">${escapeHtml(demand.description)}</textarea>
-    <label>Tipo</label>
-    <select id="f-type" style="width:100%">
-      ${['reel', 'carrossel', 'story', 'post', 'estrategia', 'design', 'outro'].map((t) => `<option value="${t}" ${demand.type === t ? 'selected' : ''}>${t}</option>`).join('')}
-    </select>
-    <label>Status</label>
+
+    <label>Briefing (Social Media)</label>
+    <textarea id="f-briefing" placeholder="Objetivo, referências, direcionamento para quem for executar..." style="min-height:80px">${escapeHtml(demand.briefing)}</textarea>
+
+    <label>Descrição / notas gerais</label>
+    <textarea id="f-desc" style="min-height:50px">${escapeHtml(demand.description)}</textarea>
+
+    <label>Formato</label>
+    <div class="checkbox-grid" id="f-format">
+      ${FORMATO_OPTIONS.map((o) => `
+        <label class="chip"><input type="checkbox" value="${escapeHtml(o.name)}" ${demand.format.includes(o.name) ? 'checked' : ''}/>${escapeHtml(o.name)}</label>
+      `).join('')}
+    </div>
+
+    <label>Plataforma</label>
+    <div class="checkbox-grid" id="f-platform">
+      ${PLATAFORMA_OPTIONS.map((o) => `
+        <label class="chip"><input type="checkbox" value="${escapeHtml(o.name)}" ${demand.platform.includes(o.name) ? 'checked' : ''}/>${escapeHtml(o.name)}</label>
+      `).join('')}
+    </div>
+
+    <label>Status (etapa do fluxo WAS)</label>
     <select id="f-status" style="width:100%">
-      ${STATUS_COLS.map((s) => `<option value="${s.key}" ${demand.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}
+      ${STAGES.map((stage) => `
+        <optgroup label="${stage.label}">
+          ${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${demand.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}
+        </optgroup>
+      `).join('')}
     </select>
-    <label>Prazo</label>
-    <input type="date" id="f-due" value="${demand.due_date || ''}" style="width:100%" />
-    <label>Responsável</label>
-    <input type="text" id="f-resp" value="${escapeHtml(demand.responsible)}" style="width:100%" />
-    <label>Prioridade</label>
-    <select id="f-priority" style="width:100%">
-      ${['alta', 'media', 'baixa'].map((p) => `<option value="${p}" ${demand.priority === p ? 'selected' : ''}>${p}</option>`).join('')}
-    </select>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <input type="checkbox" id="f-needs-capture" ${demand.needs_capture !== false ? 'checked' : ''} style="width:auto" />
+      Precisa de captação
+    </label>
+    <div id="capture-date-wrap" style="${demand.needs_capture === false ? 'display:none' : ''}">
+      <label>Dia da captação</label>
+      <input type="date" id="f-capture-date" value="${demand.capture_date || ''}" />
+    </div>
+
+    <div class="two-col">
+      <div>
+        <label>Prazo designer</label>
+        <input type="date" id="f-prazo-designer" value="${demand.prazo_designer || ''}" />
+      </div>
+      <div>
+        <label>Prazo final</label>
+        <input type="date" id="f-prazo-final" value="${demand.prazo_final || ''}" />
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div>
+        <label>Prioridade</label>
+        <select id="f-priority">
+          ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${demand.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label>Previsão</label>
+        <select id="f-forecast">
+          ${FORECAST_OPTIONS.map((p) => `<option value="${p.key}" ${demand.forecast === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div>
+        <label>Responsável</label>
+        <input type="text" id="f-resp" value="${escapeHtml(demand.responsible)}" placeholder="ex: Ana (social), Bruno (design)" />
+      </div>
+      <div>
+        <label>Refações</label>
+        <select id="f-refacao">
+          ${REFACAO_OPTIONS.map((r) => `<option value="${r.key}" ${demand.refacao === r.key ? 'selected' : ''}>${r.label}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
     <label>Link (arquivo, drive, etc.)</label>
     <input type="text" id="f-link" value="${escapeHtml(demand.link)}" style="width:100%" />
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
@@ -307,6 +720,9 @@ function openDemandModal(demand) {
       <button class="btn" id="btn-save">Salvar</button>
     </div>
   `);
+  document.getElementById('f-needs-capture').onchange = (e) => {
+    document.getElementById('capture-date-wrap').style.display = e.target.checked ? '' : 'none';
+  };
   document.getElementById('btn-cancel').onclick = closeModal;
   if (isEdit) {
     document.getElementById('btn-delete').onclick = async () => {
@@ -318,19 +734,29 @@ function openDemandModal(demand) {
     };
   }
   document.getElementById('btn-save').onclick = async () => {
+    const format = Array.from(document.querySelectorAll('#f-format input:checked')).map((i) => i.value);
+    const platform = Array.from(document.querySelectorAll('#f-platform input:checked')).map((i) => i.value);
+    const needsCapture = document.getElementById('f-needs-capture').checked;
     const payload = {
       client_id: document.getElementById('f-client').value,
       title: document.getElementById('f-title').value.trim(),
+      briefing: document.getElementById('f-briefing').value.trim(),
       description: document.getElementById('f-desc').value.trim(),
-      type: document.getElementById('f-type').value,
+      format,
+      platform,
       status: document.getElementById('f-status').value,
-      due_date: document.getElementById('f-due').value,
+      needs_capture: needsCapture,
+      capture_date: needsCapture ? document.getElementById('f-capture-date').value : '',
+      prazo_designer: document.getElementById('f-prazo-designer').value,
+      prazo_final: document.getElementById('f-prazo-final').value,
       responsible: document.getElementById('f-resp').value.trim(),
       priority: document.getElementById('f-priority').value,
+      forecast: document.getElementById('f-forecast').value,
+      refacao: document.getElementById('f-refacao').value,
       link: document.getElementById('f-link').value.trim(),
       visible_to_client: document.getElementById('f-visible').checked,
     };
-    if (!payload.title) return alert('Informe o título da demanda.');
+    if (!payload.title) return alert('Informe o nome da demanda.');
     if (isEdit) await api('/demands/' + demand.id, { method: 'PUT', body: JSON.stringify(payload) });
     else await api('/demands', { method: 'POST', body: JSON.stringify(payload) });
     closeModal();

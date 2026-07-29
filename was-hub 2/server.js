@@ -46,7 +46,16 @@ const REAL_CLIENTS = [
   { name: 'Canopus', color: 'default' },
 ];
 
-const DEFAULT_PAGES = ['Calendário de Entrega', 'Planejamento', 'Brand Guide e Acessos'];
+// Páginas padrão criadas automaticamente para cada cliente.
+// "Calendário de Entrega" é do tipo 'calendar' — não é editada manualmente,
+// e sim gerada ao vivo a partir das demandas do cliente (prazo designer / prazo final).
+const DEFAULT_PAGES = [
+  { title: 'Calendário de Entrega', type: 'calendar' },
+  { title: 'Planejamento', type: 'page' },
+  { title: 'Brand Guide e Acessos', type: 'page' },
+];
+
+const STATUS_RENAME = { nao_utilizado: 'arquivado' };
 
 // ---------- Persistência ----------
 function emptyDB() {
@@ -66,7 +75,9 @@ function loadDB() {
   if (!db.demands) db.demands = [];
   if (!db.strategies) db.strategies = [];
 
-  const dirty = ensureRoster(db) || ensureDefaultPagesForAllClients(db);
+  ensureRoster(db);
+  ensureDefaultPagesForAllClients(db);
+  migrateStatuses(db);
   saveDB(db); // idempotente — garante que o arquivo sempre existe, mesmo na primeira vez
   return db;
 }
@@ -91,13 +102,13 @@ function slugify(str) {
 }
 
 function createDefaultPages(db, clientId) {
-  DEFAULT_PAGES.forEach((title, i) => {
+  DEFAULT_PAGES.forEach((def, i) => {
     db.pages.push({
       id: id(),
       client_id: clientId,
       parent_id: null,
-      type: 'page',
-      title,
+      type: def.type,
+      title: def.title,
       content: '',
       order: i,
       created_at: new Date().toISOString(),
@@ -107,7 +118,6 @@ function createDefaultPages(db, clientId) {
 }
 
 function ensureRoster(db) {
-  let changed = false;
   const existingNames = new Set(db.clients.map((c) => c.name.trim().toLowerCase()));
   REAL_CLIENTS.forEach((rc) => {
     if (existingNames.has(rc.name.trim().toLowerCase())) return;
@@ -125,36 +135,41 @@ function ensureRoster(db) {
     };
     db.clients.push(client);
     createDefaultPages(db, client.id);
-    changed = true;
   });
-  return changed;
 }
 
 function ensureDefaultPagesForAllClients(db) {
-  let changed = false;
   db.clients.forEach((c) => {
-    const rootTitles = new Set(
-      db.pages.filter((p) => p.client_id === c.id && !p.parent_id).map((p) => p.title)
-    );
-    const missing = DEFAULT_PAGES.filter((t) => !rootTitles.has(t));
-    if (!missing.length) return;
-    const startOrder = db.pages.filter((p) => p.client_id === c.id && !p.parent_id).length;
-    missing.forEach((title, i) => {
+    const rootPages = db.pages.filter((p) => p.client_id === c.id && !p.parent_id);
+    const rootTitles = new Set(rootPages.map((p) => p.title));
+    const startOrder = rootPages.length;
+    DEFAULT_PAGES.forEach((def, i) => {
+      if (rootTitles.has(def.title)) return;
       db.pages.push({
         id: id(),
         client_id: c.id,
         parent_id: null,
-        type: 'page',
-        title,
+        type: def.type,
+        title: def.title,
         content: '',
         order: startOrder + i,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
     });
-    changed = true;
+    // Migração: páginas "Calendário de Entrega" criadas antes de existir o tipo 'calendar'
+    db.pages.forEach((p) => {
+      if (p.client_id === c.id && p.title === 'Calendário de Entrega' && p.type !== 'calendar') {
+        p.type = 'calendar';
+      }
+    });
   });
-  return changed;
+}
+
+function migrateStatuses(db) {
+  db.demands.forEach((d) => {
+    if (STATUS_RENAME[d.status]) d.status = STATUS_RENAME[d.status];
+  });
 }
 
 // ---------- Helpers HTTP ----------
@@ -227,7 +242,7 @@ async function handleAPI(req, res, pathname, query) {
       const slug = resId;
       const client = db.clients.find((c) => c.portal_slug === slug);
       if (!client) return sendJSON(res, 404, { error: 'Cliente não encontrado' });
-      const demands = db.demands.filter((d) => d.client_id === client.id && d.visible_to_client);
+      const demands = db.demands.filter((d) => d.client_id === client.id && d.visible_to_client && d.status !== 'arquivado');
       const strategies = db.strategies.filter((s) => s.client_id === client.id && s.visible_to_client);
       return sendJSON(res, 200, { client, demands, strategies });
     }

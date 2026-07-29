@@ -1537,8 +1537,6 @@ function applySelectionHighlight(root) {
 // Listener único (fica sempre ativo, mas só age quando a tabela de Demandas está na tela).
 function handleTableKeydown(e) {
   if (state.page !== 'demandas' || state.demandsView !== 'table') return;
-  const active = document.activeElement;
-  if (active && ['INPUT', 'SELECT', 'TEXTAREA'].includes(active.tagName)) return;
   const sel = state.tableSelection;
   if (!sel) return;
   const rowIds = state.tableRowIds || [];
@@ -1546,6 +1544,27 @@ function handleTableKeydown(e) {
   const maxR = rowIds.length - 1;
   const maxC = cols.length - 1;
   const meta = e.ctrlKey || e.metaKey;
+  const isRange = sel.r1 !== sel.r2 || sel.c1 !== sel.c2;
+
+  // Copiar é inofensivo (não altera nada) — sempre permitido, mesmo com um campo focado,
+  // a menos que o usuário tenha texto selecionado dentro do campo (aí respeita a cópia nativa de texto).
+  if (meta && e.key.toLowerCase() === 'c') {
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') && active.selectionStart !== active.selectionEnd) return;
+    const d = state.demands.find((x) => x.id === rowIds[sel.r1]);
+    if (!d) return;
+    const colId = cols[sel.c1];
+    const value = getCellValue(colId, d);
+    if (value === null) return;
+    e.preventDefault();
+    state.tableClipboard = { colId, value };
+    toast('Célula copiada.', 'info');
+    return;
+  }
+
+  // Os demais atalhos (setas, colar, limpar) só agem quando um INTERVALO de células foi
+  // selecionado arrastando o mouse — assim nunca atrapalham a digitação normal num campo único.
+  if (!isRange) return;
 
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
     e.preventDefault();
@@ -1556,18 +1575,6 @@ function handleTableKeydown(e) {
     if (e.key === 'ArrowRight') c2 = Math.min(maxC, c2 + 1);
     state.tableSelection = e.shiftKey ? { r1: sel.r1, c1: sel.c1, r2, c2 } : { r1: r2, c1: c2, r2, c2 };
     applySelectionHighlight(document.getElementById('demands-view'));
-    return;
-  }
-
-  if (meta && e.key.toLowerCase() === 'c') {
-    e.preventDefault();
-    const d = state.demands.find((x) => x.id === rowIds[sel.r1]);
-    if (!d) return;
-    const colId = cols[sel.c1];
-    const value = getCellValue(colId, d);
-    if (value === null) return;
-    state.tableClipboard = { colId, value };
-    toast('Célula copiada.', 'info');
     return;
   }
 

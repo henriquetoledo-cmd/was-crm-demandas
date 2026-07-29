@@ -78,6 +78,10 @@ const SLASH_ITEMS = [
   { key: 'quote', label: 'Citação', icon: '❝', hint: 'bloco de citação' },
   { key: 'divider', label: 'Divisor', icon: '—', hint: 'linha separadora' },
   { key: 'subpage', label: 'Nova subpágina', icon: '📄', hint: 'cria página dentro desta' },
+  { key: 'image', label: 'Imagem', icon: '🖼', hint: 'cole o link de uma imagem' },
+  { key: 'video', label: 'Vídeo', icon: '🎬', hint: 'YouTube, Vimeo ou link direto' },
+  { key: 'pdf', label: 'PDF', icon: '📑', hint: 'cole o link de um PDF' },
+  { key: 'html', label: 'Incorporar HTML', icon: '</>', hint: 'cole um trecho de HTML/embed' },
 ];
 
 const WEEKDAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
@@ -140,6 +144,7 @@ const state = {
   expandedFolders: new Set(),
   collapsedStages: new Set(),
   demandsView: 'kanban',
+  selectedDemandIds: new Set(),
   calendarCursor: null,
   automacoesTab: 'regras',
   focusTitleForPageId: null,
@@ -247,6 +252,30 @@ function render() {
   if (state.page === 'automacoes') return renderAutomacoes(main);
 }
 
+const DEADLINE_FIELD_LABELS = { prazo_final: 'Prazo final', prazo_designer: 'Prazo designer', capture_date: 'Captação' };
+const DEADLINE_DAYS_LABELS = { 0: 'no dia', 1: '1 dia antes', 2: '2 dias antes', 3: '3 dias antes', 5: '5 dias antes', 7: '7 dias antes' };
+
+function computeDeadlineAlerts() {
+  const today = todayStr();
+  return (state.automations || [])
+    .filter((a) => a.active && a.kind === 'deadline')
+    .map((auto) => {
+      const field = auto.trigger.field;
+      const daysBefore = Number(auto.trigger.daysBefore) || 0;
+      const targetDate = addDaysStr(today, daysBefore);
+      const items = state.demands.filter((d) => {
+        if (DONE_STATUSES.includes(d.status)) return false;
+        if (field === 'capture_date') {
+          if (d.needs_capture === false) return false;
+          return d.capture_date === targetDate;
+        }
+        return d[field] === targetDate;
+      });
+      return { auto, field, daysBefore, items };
+    })
+    .filter((g) => g.items.length);
+}
+
 function computeNotifications() {
   const today = todayStr();
   const tomorrow = addDaysStr(today, 1);
@@ -275,14 +304,19 @@ function computeNotifications() {
     }
   });
 
-  return { overdue, dueToday, dueTomorrow, captureSoon, designerSoon, waitingClient };
+  const deadlineAlerts = computeDeadlineAlerts();
+  return { overdue, dueToday, dueTomorrow, captureSoon, designerSoon, waitingClient, deadlineAlerts };
 }
 
 function updateNavBadges() {
   const badge = document.getElementById('nav-badge-notif');
   if (!badge) return;
   const n = computeNotifications();
-  const urgent = n.overdue.length + n.dueToday.length;
+  const alertIds = new Set();
+  n.deadlineAlerts.forEach((g) => g.items.forEach((d) => alertIds.add(d.id)));
+  n.overdue.forEach((d) => alertIds.add(d.id));
+  n.dueToday.forEach((d) => alertIds.add(d.id));
+  const urgent = alertIds.size;
   if (urgent > 0) {
     badge.textContent = urgent;
     badge.style.display = 'inline-flex';
@@ -734,6 +768,15 @@ function openSlashMenu(contentEl, page, autosaveContent) {
         document.execCommand('insertHTML', false, `<span class="page-chip" contenteditable="false" data-page-id="${newPage.id}">📄 Nova página</span>&nbsp;`);
         state.expandedFolders.add(page.id);
         state.focusTitleForPageId = newPage.id;
+        autosaveContent();
+        return;
+      } else if (['image', 'video', 'pdf', 'html'].includes(item.key)) {
+        openEmbedModal(item.key, (value) => {
+          restore();
+          document.execCommand('insertHTML', false, buildEmbedHtml(item.key, value));
+          autosaveContent();
+        });
+        return;
       }
       autosaveContent();
     };
@@ -744,6 +787,69 @@ function openSlashMenu(contentEl, page, autosaveContent) {
 function closeSlashMenu() {
   const root = document.getElementById('ctx-menu-root');
   if (root && root.querySelector('.slash-menu')) root.innerHTML = '';
+}
+
+// Blocos de mídia inseridos via "/", sempre com prévia direto na página (sem sair do site).
+function youtubeEmbedUrl(url) {
+  const watchMatch = url.match(/[?&]v=([\w-]{6,})/);
+  const shortMatch = url.match(/youtu\.be\/([\w-]{6,})/);
+  const id = (watchMatch && watchMatch[1]) || (shortMatch && shortMatch[1]);
+  return id ? `https://www.youtube.com/embed/${id}` : null;
+}
+function vimeoEmbedUrl(url) {
+  const m = url.match(/vimeo\.com\/(\d+)/);
+  return m ? `https://player.vimeo.com/video/${m[1]}` : null;
+}
+
+function buildEmbedHtml(kind, value) {
+  if (kind === 'image') {
+    return `<div class="embed-block embed-image" contenteditable="false"><img src="${escapeHtml(value)}" alt="" /></div>&nbsp;`;
+  }
+  if (kind === 'video') {
+    const yt = youtubeEmbedUrl(value);
+    const vim = vimeoEmbedUrl(value);
+    if (yt || vim) {
+      return `<div class="embed-block embed-video" contenteditable="false"><iframe src="${escapeHtml(yt || vim)}" allowfullscreen></iframe></div>&nbsp;`;
+    }
+    return `<div class="embed-block embed-video" contenteditable="false"><video controls src="${escapeHtml(value)}"></video></div>&nbsp;`;
+  }
+  if (kind === 'pdf') {
+    return `<div class="embed-block embed-pdf" contenteditable="false"><iframe src="${escapeHtml(value)}"></iframe></div>&nbsp;`;
+  }
+  if (kind === 'html') {
+    return `<div class="embed-block embed-html" contenteditable="false"><iframe sandbox="allow-same-origin allow-popups" srcdoc="${escapeHtml(value)}"></iframe></div>&nbsp;`;
+  }
+  return '';
+}
+
+function openEmbedModal(kind, onInsert) {
+  const conf = {
+    image: { title: 'Inserir imagem', label: 'Link da imagem', placeholder: 'https://...', textarea: false },
+    video: { title: 'Inserir vídeo', label: 'Link do YouTube, Vimeo ou vídeo direto', placeholder: 'https://youtube.com/watch?v=...', textarea: false },
+    pdf: { title: 'Inserir PDF', label: 'Link do PDF', placeholder: 'https://.../arquivo.pdf', textarea: false },
+    html: { title: 'Incorporar HTML', label: 'Cole o trecho de HTML/embed', placeholder: '<iframe ...></iframe>', textarea: true },
+  }[kind];
+
+  showModal(`
+    <h2>${conf.title}</h2>
+    <label>${conf.label}</label>
+    ${conf.textarea
+      ? `<textarea id="embed-value" placeholder="${escapeHtml(conf.placeholder)}" style="min-height:140px"></textarea>`
+      : `<input type="text" id="embed-value" placeholder="${escapeHtml(conf.placeholder)}" style="width:100%" />`}
+    <p style="color:var(--text-dim);font-size:12px;margin-top:10px">A prévia aparece direto na página, sem precisar sair do site.</p>
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Cancelar</button>
+      <button class="btn" id="btn-insert">Inserir</button>
+    </div>
+  `);
+  document.getElementById('btn-cancel').onclick = closeModal;
+  document.getElementById('btn-insert').onclick = () => {
+    const value = document.getElementById('embed-value').value.trim();
+    if (!value) { toast('Cole um link ou código antes de inserir.', 'warn'); return; }
+    closeModal();
+    onInsert(value);
+  };
+  setTimeout(() => document.getElementById('embed-value').focus(), 0);
 }
 
 // Página "Calendário de Entrega": calendário mensal de verdade, sempre com base no dia atual.
@@ -951,14 +1057,18 @@ function renderFilterBar(container) {
 
   if (pillDef.kind === 'multi') {
     const options = filterPillOptions(pillDef.key);
+    const showSearch = options.length > 6;
     slot.innerHTML = `
       <div class="filter-popover" style="left:${rect.left - containerRect.left}px; top:${rect.bottom - containerRect.top + 6}px">
-        ${options.length ? options.map((o) => `
-          <label class="filter-opt">
-            <input type="checkbox" value="${escapeHtml(o.value)}" ${state.filters[pillDef.key].has(o.value) ? 'checked' : ''} />
-            ${escapeHtml(o.label)}
-          </label>
-        `).join('') : '<div class="filter-popover-empty">Nada para filtrar ainda.</div>'}
+        ${showSearch ? `<div class="filter-search"><span class="filter-search-icon">🔎</span><input type="text" id="filter-search-input" placeholder="Buscar ${escapeHtml(pillDef.label.toLowerCase())}..." /></div>` : ''}
+        <div class="filter-opt-list">
+          ${options.length ? options.map((o) => `
+            <label class="filter-opt" data-label="${escapeHtml(o.label.toLowerCase())}">
+              <input type="checkbox" value="${escapeHtml(o.value)}" ${state.filters[pillDef.key].has(o.value) ? 'checked' : ''} />
+              ${escapeHtml(o.label)}
+            </label>
+          `).join('') : '<div class="filter-popover-empty">Nada para filtrar ainda.</div>'}
+        </div>
       </div>
     `;
     slot.querySelectorAll('input[type=checkbox]').forEach((cb) => {
@@ -968,6 +1078,17 @@ function renderFilterBar(container) {
         renderDemandas(document.getElementById('main'));
       };
     });
+    const searchInput = document.getElementById('filter-search-input');
+    if (searchInput) {
+      searchInput.addEventListener('click', (e) => e.stopPropagation());
+      searchInput.addEventListener('input', () => {
+        const q = searchInput.value.trim().toLowerCase();
+        slot.querySelectorAll('.filter-opt').forEach((el) => {
+          el.style.display = el.dataset.label.includes(q) ? '' : 'none';
+        });
+      });
+      setTimeout(() => searchInput.focus(), 0);
+    }
   } else {
     slot.innerHTML = `
       <div class="filter-popover range" style="left:${rect.left - containerRect.left}px; top:${rect.bottom - containerRect.top + 6}px">
@@ -1137,47 +1258,109 @@ function renderDemandCard(d) {
   `;
 }
 
+// ---------- Tabela: edição inline (sem abrir o card) + edição em massa ----------
+async function patchInline(demand, payload, opts) {
+  await api('/demands/' + demand.id, { method: 'PUT', body: JSON.stringify(payload) });
+  Object.assign(demand, payload);
+  const idx = state.demands.findIndex((d) => d.id === demand.id);
+  if (idx > -1) state.demands[idx] = { ...state.demands[idx], ...payload };
+  updateNavBadges();
+  if (!opts || opts.rerender !== false) renderDemandas(document.getElementById('main'));
+}
+const patchInlineDebounced = debounce((demand, payload) => patchInline(demand, payload, { rerender: false }), 500);
+
+function openInlineMultiPopover(anchorEl, options, selectedValues, onChange) {
+  const root = document.getElementById('ctx-menu-root');
+  const rect = anchorEl.getBoundingClientRect();
+  const left = Math.min(rect.left, window.innerWidth - 240);
+  root.innerHTML = `
+    <div class="inline-popover" style="left:${left}px; top:${rect.bottom + 4}px">
+      ${options.length ? options.map((o) => `
+        <label class="filter-opt">
+          <input type="checkbox" value="${escapeHtml(o)}" ${selectedValues.includes(o) ? 'checked' : ''} />
+          ${escapeHtml(o)}
+        </label>
+      `).join('') : '<div class="filter-popover-empty">Nada disponível.</div>'}
+    </div>
+  `;
+  root.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+    cb.onclick = (e) => e.stopPropagation();
+    cb.onchange = () => {
+      let next = selectedValues.slice();
+      if (cb.checked) next.push(cb.value);
+      else next = next.filter((v) => v !== cb.value);
+      root.innerHTML = '';
+      onChange(next);
+    };
+  });
+  setTimeout(() => document.addEventListener('click', () => { root.innerHTML = ''; }, { once: true }), 0);
+}
+
 function renderDemandTable(root, filtered) {
   const sorted = [...filtered].sort((a, b) => (a.prazo_final || '9999').localeCompare(b.prazo_final || '9999'));
+  const teamNames = activeTeamNames();
+
   root.innerHTML = `
+    <div id="bulk-bar-slot"></div>
     <div class="table-wrap">
-      <table class="data-table">
+      <table class="data-table editable">
         <thead>
           <tr>
+            <th style="width:30px"><input type="checkbox" id="check-all" /></th>
             <th>Demanda</th><th>Cliente</th><th>Status</th><th>Formato</th><th>Plataforma</th>
-            <th>Responsável</th><th>Prioridade</th><th>Prazo designer</th><th>Prazo final</th><th>Captação</th>
+            <th>Responsável</th><th>Prioridade</th><th>Prazo designer</th><th>Prazo final</th><th>Captação</th><th></th>
           </tr>
         </thead>
         <tbody>
           ${sorted.length ? sorted.map((d) => {
-            const sd = statusDef(d.status);
-            const pr = PRIORIDADE_OPTIONS.find((p) => p.key === d.priority) || PRIORIDADE_OPTIONS[0];
             const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
-            let captureCell = '—';
-            if (d.needs_capture === false) captureCell = '<span class="tag tag-gray">sem captação</span>';
-            else if (d.capture_date) captureCell = `🎬 ${formatDateBR(d.capture_date)}`;
+            const respOptions = d.responsible && !teamNames.includes(d.responsible) ? [...teamNames, d.responsible] : teamNames;
             return `
               <tr data-id="${d.id}">
-                <td class="td-title">${escapeHtml(d.title)}</td>
-                <td><span class="tag tag-${clientColor(d.client_id)}">${escapeHtml(clientName(d.client_id))}</span></td>
-                <td><span class="tag tag-${sd.color}">${sd.label}</span></td>
-                <td>${(d.format || []).join(', ') || '—'}</td>
-                <td>${(d.platform || []).join(', ') || '—'}</td>
-                <td>${escapeHtml(d.responsible) || '—'}</td>
-                <td><span class="tag tag-${pr.color}">${pr.label}</span></td>
-                <td>${formatDateBR(d.prazo_designer) || '—'}</td>
-                <td class="${overdue ? 'overdue-cell' : ''}">${formatDateBR(d.prazo_final) || '—'}</td>
-                <td>${captureCell}</td>
+                <td><input type="checkbox" class="row-check" data-id="${d.id}" ${state.selectedDemandIds.has(d.id) ? 'checked' : ''} /></td>
+                <td class="td-title"><input type="text" class="cell-input cell-title" data-id="${d.id}" value="${escapeHtml(d.title)}" /></td>
+                <td>
+                  <select class="cell-select" data-id="${d.id}" data-field="client_id">
+                    ${state.clients.map((c) => `<option value="${c.id}" ${d.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+                  </select>
+                </td>
+                <td>
+                  <select class="cell-select tag-${statusDef(d.status).color}" data-id="${d.id}" data-field="status">
+                    ${STAGES.map((stage) => `<optgroup label="${stage.label}">${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${d.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}</optgroup>`).join('')}
+                  </select>
+                </td>
+                <td><button class="cell-multi-btn" data-id="${d.id}" data-field="format">${(d.format || []).join(', ') || '+ adicionar'}</button></td>
+                <td><button class="cell-multi-btn" data-id="${d.id}" data-field="platform">${(d.platform || []).join(', ') || '+ adicionar'}</button></td>
+                <td>
+                  <select class="cell-select" data-id="${d.id}" data-field="responsible">
+                    <option value="">—</option>
+                    ${respOptions.map((n) => `<option value="${escapeHtml(n)}" ${d.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+                  </select>
+                </td>
+                <td>
+                  <select class="cell-select" data-id="${d.id}" data-field="priority">
+                    ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${d.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+                  </select>
+                </td>
+                <td><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_designer" value="${d.prazo_designer || ''}" /></td>
+                <td class="${overdue ? 'overdue-cell' : ''}"><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_final" value="${d.prazo_final || ''}" /></td>
+                <td class="cell-capture">
+                  <label class="capture-toggle"><input type="checkbox" class="cell-capture-toggle" data-id="${d.id}" ${d.needs_capture !== false ? 'checked' : ''} /> 🎬</label>
+                  ${d.needs_capture !== false ? `<input type="date" class="cell-input cell-capture-date" data-id="${d.id}" value="${d.capture_date || ''}" />` : ''}
+                </td>
+                <td><button class="icon-btn" data-expand="${d.id}" title="Abrir card completo">⤢</button></td>
               </tr>
             `;
-          }).join('') : `<tr><td colspan="10"><div class="empty-state">Nenhuma demanda encontrada com esses filtros.</div></td></tr>`}
+          }).join('') : `<tr><td colspan="12"><div class="empty-state">Nenhuma demanda encontrada com esses filtros.</div></td></tr>`}
         </tbody>
       </table>
     </div>
   `;
+
+  renderBulkBar(document.getElementById('bulk-bar-slot'));
+
   root.querySelectorAll('tr[data-id]').forEach((tr) => {
     const demand = state.demands.find((d) => d.id === tr.dataset.id);
-    tr.onclick = () => openDemandModal(demand);
     tr.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       showContextMenu(e.pageX, e.pageY, [
@@ -1187,6 +1370,7 @@ function renderDemandTable(root, filtered) {
             const ok = await confirmDialog(`Excluir "${demand.title}"?`);
             if (!ok) return;
             await api('/demands/' + demand.id, { method: 'DELETE' });
+            state.selectedDemandIds.delete(demand.id);
             await loadAll();
             render();
             toast('Demanda excluída.', 'success');
@@ -1195,6 +1379,127 @@ function renderDemandTable(root, filtered) {
       ]);
     });
   });
+
+  root.querySelectorAll('.row-check').forEach((cb) => {
+    cb.onclick = (e) => e.stopPropagation();
+    cb.onchange = () => {
+      if (cb.checked) state.selectedDemandIds.add(cb.dataset.id);
+      else state.selectedDemandIds.delete(cb.dataset.id);
+      renderBulkBar(document.getElementById('bulk-bar-slot'));
+      const headCb = document.getElementById('check-all');
+      if (headCb) headCb.checked = sorted.length > 0 && sorted.every((d) => state.selectedDemandIds.has(d.id));
+    };
+  });
+  const checkAll = document.getElementById('check-all');
+  if (checkAll) {
+    checkAll.checked = sorted.length > 0 && sorted.every((d) => state.selectedDemandIds.has(d.id));
+    checkAll.onchange = () => {
+      if (checkAll.checked) sorted.forEach((d) => state.selectedDemandIds.add(d.id));
+      else sorted.forEach((d) => state.selectedDemandIds.delete(d.id));
+      renderDemandas(document.getElementById('main'));
+    };
+  }
+
+  root.querySelectorAll('.cell-title').forEach((input) => {
+    input.onclick = (e) => e.stopPropagation();
+    input.addEventListener('input', () => {
+      const demand = state.demands.find((d) => d.id === input.dataset.id);
+      patchInlineDebounced(demand, { title: input.value.trim() || 'Sem título' });
+    });
+  });
+
+  root.querySelectorAll('.cell-select').forEach((sel) => {
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      const demand = state.demands.find((d) => d.id === sel.dataset.id);
+      patchInline(demand, { [sel.dataset.field]: sel.value });
+    };
+  });
+
+  root.querySelectorAll('input[type=date].cell-input').forEach((inp) => {
+    inp.onclick = (e) => e.stopPropagation();
+    inp.onchange = () => {
+      const demand = state.demands.find((d) => d.id === inp.dataset.id);
+      patchInline(demand, { [inp.dataset.field]: inp.value });
+    };
+  });
+
+  root.querySelectorAll('.cell-capture-toggle').forEach((cb) => {
+    cb.onclick = (e) => e.stopPropagation();
+    cb.onchange = () => {
+      const demand = state.demands.find((d) => d.id === cb.dataset.id);
+      patchInline(demand, { needs_capture: cb.checked, capture_date: cb.checked ? demand.capture_date : '' });
+    };
+  });
+  root.querySelectorAll('.cell-capture-date').forEach((inp) => {
+    inp.onclick = (e) => e.stopPropagation();
+    inp.onchange = () => {
+      const demand = state.demands.find((d) => d.id === inp.dataset.id);
+      patchInline(demand, { capture_date: inp.value });
+    };
+  });
+
+  root.querySelectorAll('.cell-multi-btn').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const demand = state.demands.find((d) => d.id === btn.dataset.id);
+      const field = btn.dataset.field;
+      const options = (field === 'format' ? FORMATO_OPTIONS : PLATAFORMA_OPTIONS).map((o) => o.name);
+      openInlineMultiPopover(btn, options, demand[field] || [], (next) => {
+        patchInline(demand, { [field]: next });
+      });
+    };
+  });
+
+  root.querySelectorAll('[data-expand]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      openDemandModal(state.demands.find((d) => d.id === btn.dataset.expand));
+    };
+  });
+}
+
+function renderBulkBar(slot) {
+  const n = state.selectedDemandIds.size;
+  if (!n) { slot.innerHTML = ''; return; }
+  slot.innerHTML = `
+    <div class="bulk-bar">
+      <span class="bulk-count">${n} selecionada${n === 1 ? '' : 's'}</span>
+      <select id="bulk-status"><option value="">Definir status...</option>${STAGES.map((stage) => `<optgroup label="${stage.label}">${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}">${s.label}</option>`).join('')}</optgroup>`).join('')}</select>
+      <select id="bulk-resp"><option value="">Definir responsável...</option>${activeTeamNames().map((n2) => `<option value="${escapeHtml(n2)}">${escapeHtml(n2)}</option>`).join('')}</select>
+      <select id="bulk-priority"><option value="">Definir prioridade...</option>${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}">${p.label}</option>`).join('')}</select>
+      <button class="btn danger small" id="bulk-delete">Excluir selecionadas</button>
+      <button class="btn secondary small" id="bulk-cancel">Cancelar seleção</button>
+    </div>
+  `;
+  async function applyBulk(field, value) {
+    const ids = Array.from(state.selectedDemandIds);
+    await Promise.all(ids.map((id) => api('/demands/' + id, { method: 'PUT', body: JSON.stringify({ [field]: value }) })));
+    ids.forEach((id) => {
+      const idx = state.demands.findIndex((d) => d.id === id);
+      if (idx > -1) state.demands[idx][field] = value;
+    });
+    updateNavBadges();
+    renderDemandas(document.getElementById('main'));
+    toast(`${ids.length} demanda(s) atualizada(s).`, 'success');
+  }
+  document.getElementById('bulk-status').onchange = (e) => { if (e.target.value) applyBulk('status', e.target.value); };
+  document.getElementById('bulk-resp').onchange = (e) => { if (e.target.value) applyBulk('responsible', e.target.value); };
+  document.getElementById('bulk-priority').onchange = (e) => { if (e.target.value) applyBulk('priority', e.target.value); };
+  document.getElementById('bulk-delete').onclick = async () => {
+    const ok = await confirmDialog(`Excluir ${n} demanda(s) selecionada(s)?`);
+    if (!ok) return;
+    const ids = Array.from(state.selectedDemandIds);
+    await Promise.all(ids.map((id) => api('/demands/' + id, { method: 'DELETE' })));
+    state.selectedDemandIds.clear();
+    await loadAll();
+    render();
+    toast(`${ids.length} demanda(s) excluída(s).`, 'success');
+  };
+  document.getElementById('bulk-cancel').onclick = () => {
+    state.selectedDemandIds.clear();
+    renderDemandas(document.getElementById('main'));
+  };
 }
 
 // Modal de demanda: criação rápida (mínima) -> depois autosave campo a campo, sem botão "Salvar".
@@ -1432,6 +1737,12 @@ function renderNotificacoes(main) {
   const designerHtml = n.designerSoon.map((d) => notifRow('🎨', d.title, `${escapeHtml(clientName(d.client_id))} · prazo do designer em ${formatDateBR(d.prazo_designer)}`, d)).join('');
   const waitingHtml = n.waitingClient.map((d) => notifRow('⏳', d.title, `${escapeHtml(clientName(d.client_id))} · aguardando aprovação do cliente`, d)).join('');
 
+  const automationHtml = n.deadlineAlerts.map((g) => {
+    const label = `🔔 Alerta: ${DEADLINE_FIELD_LABELS[g.field] || g.field} (${DEADLINE_DAYS_LABELS[g.daysBefore] || g.daysBefore + ' dias antes'})`;
+    const rows = g.items.map((d) => notifRow('🔔', d.title, `${escapeHtml(clientName(d.client_id))} · ${escapeHtml(DEADLINE_FIELD_LABELS[g.field] || g.field)} em ${formatDateBR(d[g.field])}`, d)).join('');
+    return renderNotifSection(label, 'blue', rows);
+  }).join('');
+
   const sections = [
     renderNotifSection('Atrasadas', 'red', overdueHtml),
     renderNotifSection('Vencem hoje', 'orange', todayHtml),
@@ -1439,6 +1750,7 @@ function renderNotificacoes(main) {
     renderNotifSection('Captação nos próximos dias', 'orange', captureHtml),
     renderNotifSection('Prazo do designer nos próximos dias', 'yellow', designerHtml),
     renderNotifSection('Aguardando aprovação do cliente', 'blue', waitingHtml),
+    automationHtml,
   ].join('');
 
   main.innerHTML = `
@@ -1491,7 +1803,7 @@ function renderAutomacoes(main) {
 function renderAutomationRules(root) {
   root.innerHTML = `
     <div class="page-header" style="margin-bottom:14px">
-      <p style="color:var(--text-dim);font-size:12px;max-width:520px">Toda vez que uma demanda for criada ou atualizada, as regras ativas rodam automaticamente. Ex: "quando Formato contiver Reels, definir Responsável = Enzo".</p>
+      <p style="color:var(--text-dim);font-size:12px;max-width:560px">Toda vez que uma demanda for criada ou atualizada, as regras de campo ativas rodam automaticamente. Os alertas de prazo aparecem na Central de Notificações conforme a data se aproxima.</p>
       <button class="btn secondary small" id="btn-new-automation">+ Nova automação</button>
     </div>
     <div class="card-list" id="automation-list"></div>
@@ -1502,10 +1814,27 @@ function renderAutomationRules(root) {
     list.innerHTML = '<div class="empty-state">Nenhuma automação criada ainda.</div>';
     return;
   }
-  list.innerHTML = state.automations.map((a) => `
+  list.innerHTML = state.automations.map((a) => {
+    if (a.kind === 'deadline') {
+      const fieldLabel = DEADLINE_FIELD_LABELS[a.trigger.field] || a.trigger.field;
+      const daysLabel = DEADLINE_DAYS_LABELS[Number(a.trigger.daysBefore)] || `${a.trigger.daysBefore} dias antes`;
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">🔔 <span class="tag tag-blue">Alerta de prazo</span></div>
+            <div class="meta">Avisar ${escapeHtml(daysLabel)} do vencimento de <strong>${escapeHtml(fieldLabel)}</strong></div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
+    return `
     <div class="client-card">
       <div>
-        <div class="name">SE <span class="tag tag-blue">${autoFieldLabel(a.trigger.field)} ${a.trigger.op === 'contains' ? 'contém' : '='} "${escapeHtml(autoValueLabel(a.trigger.field, a.trigger.value))}"</span></div>
+        <div class="name">⚙️ SE <span class="tag tag-blue">${autoFieldLabel(a.trigger.field)} ${a.trigger.op === 'contains' ? 'contém' : '='} "${escapeHtml(autoValueLabel(a.trigger.field, a.trigger.value))}"</span></div>
         <div class="meta">ENTÃO <span class="tag tag-green">${autoFieldLabel(a.action.field)} = "${escapeHtml(autoValueLabel(a.action.field, a.action.value))}"</span></div>
       </div>
       <div class="actions" style="display:flex;align-items:center;gap:10px">
@@ -1513,7 +1842,8 @@ function renderAutomationRules(root) {
         <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
   list.querySelectorAll('[data-toggle]').forEach((cb) => {
     cb.onchange = async () => {
       await api('/automations/' + cb.dataset.toggle, { method: 'PUT', body: JSON.stringify({ active: cb.checked }) });
@@ -1553,18 +1883,36 @@ function automationValueOptions(field) {
 function openAutomationModal() {
   showModal(`
     <h2>Nova automação</h2>
-    <label>Quando</label>
-    <select id="auto-trigger-field" style="width:100%">
-      ${automationFieldOptions('trigger').map((o) => `<option value="${o.v}">${o.l}</option>`).join('')}
+    <label>Tipo</label>
+    <select id="auto-kind" style="width:100%">
+      <option value="field">Regra de campo (quando X, definir Y)</option>
+      <option value="deadline">Alerta de prazo (avisar antes de vencer)</option>
     </select>
-    <label>For igual a / contiver</label>
-    <select id="auto-trigger-value" style="width:100%"></select>
-    <label style="margin-top:18px">Então definir</label>
-    <select id="auto-action-field" style="width:100%">
-      ${automationFieldOptions('action').map((o) => `<option value="${o.v}">${o.l}</option>`).join('')}
-    </select>
-    <label>Como</label>
-    <select id="auto-action-value" style="width:100%"></select>
+    <div id="auto-form-field">
+      <label style="margin-top:14px">Quando</label>
+      <select id="auto-trigger-field" style="width:100%">
+        ${automationFieldOptions('trigger').map((o) => `<option value="${o.v}">${o.l}</option>`).join('')}
+      </select>
+      <label>For igual a / contiver</label>
+      <select id="auto-trigger-value" style="width:100%"></select>
+      <label style="margin-top:18px">Então definir</label>
+      <select id="auto-action-field" style="width:100%">
+        ${automationFieldOptions('action').map((o) => `<option value="${o.v}">${o.l}</option>`).join('')}
+      </select>
+      <label>Como</label>
+      <select id="auto-action-value" style="width:100%"></select>
+    </div>
+    <div id="auto-form-deadline" class="hidden">
+      <label style="margin-top:14px">Avisar antes de vencer o</label>
+      <select id="auto-deadline-field" style="width:100%">
+        ${Object.entries(DEADLINE_FIELD_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
+      </select>
+      <label>Com quantos dias de antecedência</label>
+      <select id="auto-deadline-days" style="width:100%">
+        ${Object.entries(DEADLINE_DAYS_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
+      </select>
+      <p style="color:var(--text-dim);font-size:12px;margin-top:10px">O alerta aparece na Central de Notificações assim que a data se aproximar — não precisa reabrir a demanda.</p>
+    </div>
     <div class="modal-footer">
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
       <button class="btn" id="btn-save">Criar automação</button>
@@ -1581,17 +1929,38 @@ function openAutomationModal() {
   document.getElementById('auto-trigger-field').onchange = () => refillValue('auto-trigger-field', 'auto-trigger-value');
   document.getElementById('auto-action-field').onchange = () => refillValue('auto-action-field', 'auto-action-value');
 
+  document.getElementById('auto-kind').onchange = (e) => {
+    const isDeadline = e.target.value === 'deadline';
+    document.getElementById('auto-form-field').classList.toggle('hidden', isDeadline);
+    document.getElementById('auto-form-deadline').classList.toggle('hidden', !isDeadline);
+  };
+
   document.getElementById('btn-cancel').onclick = closeModal;
   document.getElementById('btn-save').onclick = async () => {
-    const triggerField = document.getElementById('auto-trigger-field').value;
-    const actionField = document.getElementById('auto-action-field').value;
-    const trigger = {
-      field: triggerField,
-      op: (triggerField === 'format' || triggerField === 'platform') ? 'contains' : 'equals',
-      value: document.getElementById('auto-trigger-value').value,
-    };
-    const action = { field: actionField, value: document.getElementById('auto-action-value').value };
-    await api('/automations', { method: 'POST', body: JSON.stringify({ trigger, action, active: true }) });
+    const kind = document.getElementById('auto-kind').value;
+    let payload;
+    if (kind === 'deadline') {
+      payload = {
+        kind: 'deadline',
+        active: true,
+        trigger: { field: document.getElementById('auto-deadline-field').value, daysBefore: Number(document.getElementById('auto-deadline-days').value) },
+        action: {},
+      };
+    } else {
+      const triggerField = document.getElementById('auto-trigger-field').value;
+      const actionField = document.getElementById('auto-action-field').value;
+      payload = {
+        kind: 'field',
+        active: true,
+        trigger: {
+          field: triggerField,
+          op: (triggerField === 'format' || triggerField === 'platform') ? 'contains' : 'equals',
+          value: document.getElementById('auto-trigger-value').value,
+        },
+        action: { field: actionField, value: document.getElementById('auto-action-value').value },
+      };
+    }
+    await api('/automations', { method: 'POST', body: JSON.stringify(payload) });
     closeModal();
     await loadAll();
     renderAutomacoes(document.getElementById('main'));

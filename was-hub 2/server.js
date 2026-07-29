@@ -64,7 +64,8 @@ const REAL_TEAM = [
 const DEFAULT_PAGES = [
   { title: 'Calendário de Entrega', type: 'calendar' },
   { title: 'Planejamento', type: 'page' },
-  { title: 'Brand Guide e Acessos', type: 'page' },
+  { title: 'Brand Guide', type: 'page' },
+  { title: 'Relatórios de Desempenho', type: 'page' },
 ];
 
 const STATUS_RENAME = { nao_utilizado: 'arquivado' };
@@ -168,6 +169,8 @@ function ensureTeam(db) {
 }
 
 function ensureDefaultPagesForAllClients(db) {
+  // migração: a antiga página combinada vira "Brand Guide" (novo padrão de 4 seções)
+  db.pages.forEach((p) => { if (p.title === 'Brand Guide e Acessos') p.title = 'Brand Guide'; });
   db.clients.forEach((c) => {
     const rootPages = db.pages.filter((p) => p.client_id === c.id && !p.parent_id);
     const rootTitles = new Set(rootPages.map((p) => p.title));
@@ -217,7 +220,7 @@ function matchTrigger(demand, trigger) {
 function applyAutomations(db, demand) {
   (db.automations || []).forEach((auto) => {
     if (!auto.active) return;
-    if (auto.kind === 'deadline') return; // alertas de prazo sao so informativos, nao alteram campos
+    if (auto.kind === 'deadline' || auto.kind === 'weekly_summary') return; // alertas de prazo e resumo semanal sao so informativos, nao alteram campos
     if (matchTrigger(demand, auto.trigger)) {
       demand[auto.action.field] = auto.action.value;
     }

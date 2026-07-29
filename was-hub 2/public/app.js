@@ -1717,12 +1717,12 @@ function notifRow(icon, title, meta, demand) {
   `;
 }
 
-function renderNotifSection(title, colorClass, items) {
-  if (!items.length) return '';
+function renderNotifSection(title, colorClass, count, itemsHtml) {
+  if (!count) return '';
   return `
     <div class="notif-section">
-      <div class="notif-section-title ${colorClass}">${title} <span class="count">${items.length}</span></div>
-      <div class="notif-list">${items}</div>
+      <div class="notif-section-title ${colorClass}">${title} <span class="count">${count}</span></div>
+      <div class="notif-list">${itemsHtml}</div>
     </div>
   `;
 }
@@ -1740,16 +1740,16 @@ function renderNotificacoes(main) {
   const automationHtml = n.deadlineAlerts.map((g) => {
     const label = `🔔 Alerta: ${DEADLINE_FIELD_LABELS[g.field] || g.field} (${DEADLINE_DAYS_LABELS[g.daysBefore] || g.daysBefore + ' dias antes'})`;
     const rows = g.items.map((d) => notifRow('🔔', d.title, `${escapeHtml(clientName(d.client_id))} · ${escapeHtml(DEADLINE_FIELD_LABELS[g.field] || g.field)} em ${formatDateBR(d[g.field])}`, d)).join('');
-    return renderNotifSection(label, 'blue', rows);
+    return renderNotifSection(label, 'blue', g.items.length, rows);
   }).join('');
 
   const sections = [
-    renderNotifSection('Atrasadas', 'red', overdueHtml),
-    renderNotifSection('Vencem hoje', 'orange', todayHtml),
-    renderNotifSection('Vencem amanhã', 'yellow', tomorrowHtml),
-    renderNotifSection('Captação nos próximos dias', 'orange', captureHtml),
-    renderNotifSection('Prazo do designer nos próximos dias', 'yellow', designerHtml),
-    renderNotifSection('Aguardando aprovação do cliente', 'blue', waitingHtml),
+    renderNotifSection('Atrasadas', 'red', n.overdue.length, overdueHtml),
+    renderNotifSection('Vencem hoje', 'orange', n.dueToday.length, todayHtml),
+    renderNotifSection('Vencem amanhã', 'yellow', n.dueTomorrow.length, tomorrowHtml),
+    renderNotifSection('Captação nos próximos dias', 'orange', n.captureSoon.length, captureHtml),
+    renderNotifSection('Prazo do designer nos próximos dias', 'yellow', n.designerSoon.length, designerHtml),
+    renderNotifSection('Aguardando aprovação do cliente', 'blue', n.waitingClient.length, waitingHtml),
     automationHtml,
   ].join('');
 

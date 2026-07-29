@@ -72,7 +72,7 @@ const STATUS_RENAME = { nao_utilizado: 'arquivado' };
 
 // ---------- Persistência ----------
 function emptyDB() {
-  return { clients: [], demands: [], strategies: [], pages: [], team: [], automations: [] };
+  return { clients: [], demands: [], strategies: [], pages: [], team: [], automations: [], customColumns: [], viewPrefs: { tableColumnOrder: [] } };
 }
 
 function loadDB() {
@@ -89,6 +89,8 @@ function loadDB() {
   if (!db.strategies) db.strategies = [];
   if (!db.team) db.team = [];
   if (!db.automations) db.automations = [];
+  if (!db.customColumns) db.customColumns = [];
+  if (!db.viewPrefs) db.viewPrefs = { tableColumnOrder: [] };
 
   ensureRoster(db);
   ensureTeam(db);
@@ -485,6 +487,7 @@ async function handleAPI(req, res, pathname, query) {
           refacao: body.refacao || '',
           visible_to_client: !!body.visible_to_client,
           link: body.link || '',
+          custom_fields: (body.custom_fields && typeof body.custom_fields === 'object') ? body.custom_fields : {},
           created_at: new Date().toISOString(),
         };
         demand = applyAutomations(db, demand);
@@ -496,7 +499,9 @@ async function handleAPI(req, res, pathname, query) {
         const idx = db.demands.findIndex((d) => d.id === resId);
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
-        let demand = { ...db.demands[idx], ...body, id: resId };
+        // custom_fields é mesclado (não substituído), pra edições em colunas diferentes não se apagarem
+        const mergedCustom = { ...(db.demands[idx].custom_fields || {}), ...(body.custom_fields || {}) };
+        let demand = { ...db.demands[idx], ...body, id: resId, custom_fields: mergedCustom };
         demand = applyAutomations(db, demand);
         db.demands[idx] = demand;
         saveDB(db);
@@ -543,6 +548,45 @@ async function handleAPI(req, res, pathname, query) {
         db.strategies = db.strategies.filter((s) => s.id !== resId);
         saveDB(db);
         return sendJSON(res, 200, { ok: true });
+      }
+    }
+
+    // ---- CUSTOM COLUMNS (colunas criadas pelo usuário na tabela de demandas) ----
+    if (resource === 'custom-columns') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.customColumns);
+      if (method === 'POST') {
+        const body = await readBody(req);
+        const col = { id: id(), name: (body.name || 'Nova coluna').trim() || 'Nova coluna', type: 'text', created_at: new Date().toISOString() };
+        db.customColumns.push(col);
+        db.viewPrefs.tableColumnOrder.push(col.id);
+        saveDB(db);
+        return sendJSON(res, 201, col);
+      }
+      if (method === 'PUT' && resId) {
+        const idx = db.customColumns.findIndex((c) => c.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
+        const body = await readBody(req);
+        db.customColumns[idx] = { ...db.customColumns[idx], ...body, id: resId };
+        saveDB(db);
+        return sendJSON(res, 200, db.customColumns[idx]);
+      }
+      if (method === 'DELETE' && resId) {
+        db.customColumns = db.customColumns.filter((c) => c.id !== resId);
+        db.viewPrefs.tableColumnOrder = db.viewPrefs.tableColumnOrder.filter((cid) => cid !== resId);
+        db.demands.forEach((d) => { if (d.custom_fields) delete d.custom_fields[resId]; });
+        saveDB(db);
+        return sendJSON(res, 200, { ok: true });
+      }
+    }
+
+    // ---- VIEW PREFS (ordem das colunas da tabela, etc. — preferências salvas) ----
+    if (resource === 'view-prefs') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.viewPrefs);
+      if (method === 'PUT' && !resId) {
+        const body = await readBody(req);
+        db.viewPrefs = { ...db.viewPrefs, ...body };
+        saveDB(db);
+        return sendJSON(res, 200, db.viewPrefs);
       }
     }
 

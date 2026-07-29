@@ -28,11 +28,18 @@ const STATUS_LABELS = {
   programado: 'Programado',
   postado: 'Postado',
   stand_by: 'Stand By',
-  nao_utilizado: 'Não utilizado',
 };
 
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function formatDateBR(iso) {
+  if (!iso) return '';
+  const parts = iso.split('-');
+  if (parts.length !== 3) return iso;
+  const [y, m, d] = parts;
+  return `${d}/${m}/${y}`;
 }
 
 async function init() {
@@ -63,8 +70,9 @@ async function init() {
 
   content.innerHTML = `
     <div class="portal-header">
+      <div class="portal-brand">We Are Sinergy</div>
       <h1>${escapeHtml(client.name)}</h1>
-      <p>Acompanhamento de entregas — We Are Sinergy</p>
+      <p>Acompanhamento de entregas em tempo real</p>
     </div>
     <div class="portal-body">
       <div class="portal-section">
@@ -74,13 +82,13 @@ async function init() {
           if (!items.length) return '';
           return `
             <div style="margin-bottom:20px">
-              <div style="font-size:12px;font-weight:700;color:var(--text-dim);margin-bottom:8px">${label} (${items.length})</div>
+              <div class="portal-group-label">${label} <span class="tag tag-default">${items.length}</span></div>
               <div class="card-list">
                 ${items.map((d) => `
                   <div class="client-card">
                     <div>
                       <div class="name">${escapeHtml(d.title)}</div>
-                      <div class="meta">${(d.format || []).join(', ')}${d.description ? ' · ' + escapeHtml(d.description) : ''}${d.prazo_final ? ' · prazo: ' + d.prazo_final : ''}</div>
+                      <div class="meta">${(d.format || []).join(', ')}${d.description ? ' · ' + escapeHtml(d.description) : ''}${d.prazo_final ? ' · prazo: ' + formatDateBR(d.prazo_final) : ''}</div>
                     </div>
                     ${d.link ? `<a href="${escapeHtml(d.link)}" target="_blank" class="btn small secondary">Abrir</a>` : ''}
                   </div>
@@ -103,6 +111,7 @@ async function init() {
           `).join('')}
         </div>
       ` : ''}
+      <div class="portal-footer">Powered by WAS — We Are Sinergy</div>
     </div>
   `;
 }

@@ -24,10 +24,10 @@ const STATUS_DEFS = [
   { key: 'aguardando_infos', label: 'Aguardando infos/materiais', color: 'gray', stage: 0 },
   { key: 'freela', label: 'Freela', color: 'gray', stage: 0 },
   { key: 'stand_by', label: 'Stand By', color: 'gray', stage: 0 },
-  { key: 'nao_utilizado', label: 'Não utilizado', color: 'default', stage: 0 },
+  { key: 'arquivado', label: 'Arquivado', color: 'default', stage: 0 },
 ];
 
-const DONE_STATUSES = ['aprovado', 'postar', 'programado', 'postado', 'stand_by', 'nao_utilizado'];
+const DONE_STATUSES = ['aprovado', 'postar', 'programado', 'postado', 'stand_by', 'arquivado'];
 
 const FORMATO_OPTIONS = [
   { name: 'Feed', color: 'green' }, { name: 'Story', color: 'green' }, { name: 'Estático', color: 'green' },
@@ -68,6 +68,14 @@ const REFACAO_OPTIONS = [
 
 function statusDef(key) { return STATUS_DEFS.find((s) => s.key === key) || STATUS_DEFS[0]; }
 
+function formatDateBR(iso) {
+  if (!iso) return '';
+  const parts = iso.split('-');
+  if (parts.length !== 3) return iso;
+  const [y, m, d] = parts;
+  return `${d}/${m}/${y}`;
+}
+
 // ---------- Estado ----------
 const state = {
   page: 'dashboard',
@@ -82,6 +90,7 @@ const state = {
   currentClientId: null,
   currentPageId: null,
   expandedFolders: new Set(),
+  collapsedStages: new Set([0]), // "Outros" começa recolhido
 };
 
 // ---------- API helpers ----------
@@ -172,7 +181,7 @@ function renderDashboard(main) {
         <div class="client-card">
           <div>
             <div class="name">${escapeHtml(d.title)}</div>
-            <div class="meta"><span class="tag tag-${clientColor(d.client_id)}">${escapeHtml(clientName(d.client_id))}</span> · vence ${d.prazo_final || 'sem data'}</div>
+            <div class="meta"><span class="tag tag-${clientColor(d.client_id)}">${escapeHtml(clientName(d.client_id))}</span> · vence ${formatDateBR(d.prazo_final) || 'sem data'}</div>
           </div>
           <span class="tag tag-${sd.color}">${sd.label}</span>
         </div>
@@ -210,15 +219,16 @@ function renderClientes(main) {
   }
   list.innerHTML = state.clients.map((c) => {
     const portalUrl = `${location.origin}/portal?slug=${c.portal_slug}`;
+    const metaParts = [c.segment, c.contact_name, c.contact_email].filter(Boolean);
     return `
     <div class="client-card">
       <div>
         <div class="name">
-          <span class="tag tag-${c.color || 'default'}">${escapeHtml(c.name)}</span>
+          <span class="tag tag-${c.color || 'default'} tag-lg">${escapeHtml(c.name)}</span>
           <span class="badge ${c.status}">${c.status}</span>
         </div>
-        <div class="meta">${escapeHtml(c.segment || '—')} · ${escapeHtml(c.contact_name || '')} ${c.contact_email ? '· ' + escapeHtml(c.contact_email) : ''}</div>
-        <div class="copy-link" style="margin-top:6px">Portal: <code>${portalUrl}</code> <a href="#" data-copy="${portalUrl}">copiar</a></div>
+        ${metaParts.length ? `<div class="meta">${metaParts.map(escapeHtml).join(' · ')}</div>` : ''}
+        <div class="copy-link">Portal do cliente: <code>${portalUrl}</code> <a href="#" data-copy="${portalUrl}">copiar link</a></div>
       </div>
       <div class="actions">
         <button class="btn small" data-open="${c.id}">Abrir</button>
@@ -254,7 +264,7 @@ function renderClientes(main) {
       e.preventDefault();
       navigator.clipboard.writeText(a.dataset.copy);
       a.textContent = 'copiado!';
-      setTimeout(() => (a.textContent = 'copiar'), 1500);
+      setTimeout(() => (a.textContent = 'copiar link'), 1500);
     };
   });
 }
@@ -310,6 +320,12 @@ function buildPageTree(pages, parentId) {
     .map((p) => ({ ...p, children: buildPageTree(pages, p.id) }));
 }
 
+function pageIcon(n) {
+  if (n.type === 'folder') return null; // tratado à parte (aberta/fechada)
+  if (n.type === 'calendar') return '📅';
+  return '📄';
+}
+
 function renderPageTreeNodes(nodes, depth) {
   return nodes.map((n) => {
     const isFolder = n.type === 'folder';
@@ -317,7 +333,7 @@ function renderPageTreeNodes(nodes, depth) {
     const isActive = state.currentPageId === n.id;
     let html = `
       <div class="page-tree-item ${isActive ? 'active' : ''}" data-id="${n.id}" data-type="${n.type}" style="padding-left:${10 + depth * 16}px">
-        <span class="ptree-icon">${isFolder ? (isOpen ? '📂' : '📁') : '📄'}</span>
+        <span class="ptree-icon">${isFolder ? (isOpen ? '📂' : '📁') : pageIcon(n)}</span>
         <span class="ptree-title">${escapeHtml(n.title)}</span>
       </div>
     `;
@@ -341,8 +357,8 @@ function renderClienteDetail(main) {
   main.innerHTML = `
     <div class="page-header">
       <div>
-        <a href="#" id="back-to-clients" style="font-size:12px;color:var(--text-dim)">&larr; Voltar para Clientes</a>
-        <h1 style="margin-top:6px"><span class="tag tag-${client.color || 'default'}">${escapeHtml(client.name)}</span></h1>
+        <a href="#" id="back-to-clients" class="back-link">&larr; Voltar para Clientes</a>
+        <h1 style="margin-top:8px"><span class="tag tag-${client.color || 'default'} tag-lg">${escapeHtml(client.name)}</span></h1>
         <p>Workspace do cliente — páginas, calendário, planejamento e acessos</p>
       </div>
     </div>
@@ -415,6 +431,12 @@ function renderPageEditor(page) {
     editor.innerHTML = '<div class="empty-state">Selecione uma página à esquerda, ou crie uma nova.</div>';
     return;
   }
+
+  if (page.type === 'calendar') {
+    renderCalendarPage(editor, page);
+    return;
+  }
+
   if (page.type === 'folder') {
     const childCount = state.pages.filter((p) => p.parent_id === page.id).length;
     editor.innerHTML = `
@@ -469,6 +491,56 @@ function renderPageEditor(page) {
   document.getElementById('btn-save-page').onclick = () => savePageContent(page, contentEl.innerHTML, document.getElementById('page-title-input').value);
   document.getElementById('page-title-input').onblur = (e) => savePageTitle(page, e.target.value);
   document.getElementById('btn-del-page').onclick = () => deletePage(page);
+}
+
+// Página "Calendário de Entrega": gerada ao vivo a partir das demandas do cliente.
+// Não é editável — sempre reflete prazo designer / prazo final / postagem em tempo real.
+function renderCalendarPage(editor, page) {
+  const demands = state.demands
+    .filter((d) => d.client_id === state.currentClientId && d.status !== 'arquivado')
+    .slice()
+    .sort((a, b) => (a.prazo_final || a.prazo_designer || '9999').localeCompare(b.prazo_final || b.prazo_designer || '9999'));
+
+  editor.innerHTML = `
+    <div class="editor-toolbar">
+      <h2 style="margin:0;font-size:17px;font-weight:700">📅 ${escapeHtml(page.title)}</h2>
+      <span class="synced-badge">sincronizado com Demandas</span>
+    </div>
+    ${demands.length ? `
+      <table class="calendar-table">
+        <thead>
+          <tr>
+            <th>Demanda</th>
+            <th>Status</th>
+            <th>Formato</th>
+            <th>Prazo designer</th>
+            <th>Postagem / Entrega</th>
+            <th>Captação</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${demands.map((d) => {
+            const sd = statusDef(d.status);
+            const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
+            let captureCell = '—';
+            if (d.needs_capture === false) captureCell = '<span class="tag tag-gray">sem captação</span>';
+            else if (d.capture_date) captureCell = `🎬 ${formatDateBR(d.capture_date)}`;
+            else captureCell = '<span class="tag tag-default">a definir</span>';
+            return `
+              <tr>
+                <td>${escapeHtml(d.title)}</td>
+                <td><span class="tag tag-${sd.color}">${sd.label}</span></td>
+                <td>${(d.format || []).map((f) => escapeHtml(f)).join(', ') || '—'}</td>
+                <td>${formatDateBR(d.prazo_designer) || '—'}</td>
+                <td class="${overdue ? 'overdue-cell' : ''}">${formatDateBR(d.prazo_final) || '—'}</td>
+                <td>${captureCell}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    ` : '<div class="empty-state">Nenhuma demanda cadastrada para este cliente ainda. Crie demandas na aba Demandas — elas aparecem aqui automaticamente.</div>'}
+  `;
 }
 
 async function savePageContent(page, content, title) {
@@ -536,9 +608,15 @@ function renderDemandas(main) {
   const kanban = document.getElementById('kanban');
   kanban.innerHTML = STAGES.map((stage) => {
     const cols = STATUS_DEFS.filter((s) => s.stage === stage.key);
+    const stageCount = cols.reduce((sum, col) => sum + filtered.filter((d) => d.status === col.key).length, 0);
+    const collapsed = state.collapsedStages.has(stage.key);
     return `
-      <div class="stage-group">
-        <div class="stage-label">${stage.label}</div>
+      <div class="stage-group ${collapsed ? 'collapsed' : ''}">
+        <div class="stage-label" data-stage="${stage.key}">
+          <span class="stage-chevron">${collapsed ? '▸' : '▾'}</span> ${stage.label}
+          <span class="count">${stageCount}</span>
+        </div>
+        ${collapsed ? '' : `
         <div class="stage-cols">
           ${cols.map((col) => {
             const items = filtered.filter((d) => d.status === col.key);
@@ -556,9 +634,19 @@ function renderDemandas(main) {
             `;
           }).join('')}
         </div>
+        `}
       </div>
     `;
   }).join('');
+
+  kanban.querySelectorAll('.stage-label').forEach((el) => {
+    el.onclick = () => {
+      const key = Number(el.dataset.stage);
+      if (state.collapsedStages.has(key)) state.collapsedStages.delete(key);
+      else state.collapsedStages.add(key);
+      renderDemandas(main);
+    };
+  });
 
   kanban.querySelectorAll('.demand-card').forEach((el) => {
     el.onclick = () => openDemandModal(state.demands.find((d) => d.id === el.dataset.id));
@@ -595,10 +683,11 @@ function renderDemandCard(d) {
   if (d.needs_capture === false) {
     captureBadge = '<span class="tag tag-gray">sem captação</span>';
   } else if (d.capture_date) {
-    captureBadge = `<span class="tag tag-orange">🎬 ${d.capture_date}</span>`;
+    captureBadge = `<span class="tag tag-orange">🎬 ${formatDateBR(d.capture_date)}</span>`;
   } else {
     captureBadge = '<span class="tag tag-default">captação a definir</span>';
   }
+  const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
   return `
     <div class="demand-card" data-id="${d.id}" draggable="true">
       <div class="title">${escapeHtml(d.title)}</div>
@@ -606,7 +695,7 @@ function renderDemandCard(d) {
       <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}</div>
       <div class="sub">
         <span><span class="priority-dot ${d.priority}"></span>${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</span>
-        <span>${d.prazo_final || d.prazo_designer || ''}</span>
+        <span class="${overdue ? 'overdue-text' : ''}">${formatDateBR(d.prazo_final) || formatDateBR(d.prazo_designer) || ''}</span>
       </div>
     </div>
   `;
@@ -675,7 +764,7 @@ function openDemandModal(demand) {
         <input type="date" id="f-prazo-designer" value="${demand.prazo_designer || ''}" />
       </div>
       <div>
-        <label>Prazo final</label>
+        <label>Postagem / entrega final</label>
         <input type="date" id="f-prazo-final" value="${demand.prazo_final || ''}" />
       </div>
     </div>

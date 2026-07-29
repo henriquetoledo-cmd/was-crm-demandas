@@ -66,6 +66,16 @@ const REFACAO_OPTIONS = [
   { key: 'v6', label: 'V6', color: 'gray' },
 ];
 
+const SLASH_ITEMS = [
+  { key: 'h2', label: 'Título 2', icon: 'H2', hint: 'título médio' },
+  { key: 'h3', label: 'Título 3', icon: 'H3', hint: 'título pequeno' },
+  { key: 'ul', label: 'Lista com marcadores', icon: '•', hint: 'lista simples' },
+  { key: 'ol', label: 'Lista numerada', icon: '1.', hint: 'lista ordenada' },
+  { key: 'quote', label: 'Citação', icon: '❝', hint: 'bloco de citação' },
+  { key: 'divider', label: 'Divisor', icon: '—', hint: 'linha separadora' },
+  { key: 'subpage', label: 'Nova subpágina', icon: '📄', hint: 'cria página dentro desta' },
+];
+
 function statusDef(key) { return STATUS_DEFS.find((s) => s.key === key) || STATUS_DEFS[0]; }
 
 function formatDateBR(iso) {
@@ -76,17 +86,22 @@ function formatDateBR(iso) {
   return `${d}/${m}/${y}`;
 }
 
+function debounce(fn, wait) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), wait);
+  };
+}
+
 // ---------- Estado ----------
 const state = {
   page: 'dashboard',
   clients: [],
   demands: [],
-  strategies: [],
   pages: [],
-  demandClientFilter: '',
-  demandRespFilter: '',
-  demandPriorityFilter: '',
-  stratClientFilter: '',
+  filters: { client: new Set(), format: new Set(), platform: new Set(), priority: new Set(), responsible: new Set() },
+  filtersPanelOpen: false,
   currentClientId: null,
   currentPageId: null,
   expandedFolders: new Set(),
@@ -107,14 +122,12 @@ async function api(path, opts) {
 }
 
 async function loadAll() {
-  const [clients, demands, strategies] = await Promise.all([
+  const [clients, demands] = await Promise.all([
     api('/clients'),
     api('/demands'),
-    api('/strategies'),
   ]);
   state.clients = clients;
   state.demands = demands;
-  state.strategies = strategies;
 }
 
 function clientById(id) {
@@ -146,7 +159,31 @@ function render() {
   if (state.page === 'clientes') return renderClientes(main);
   if (state.page === 'cliente-detail') return renderClienteDetail(main);
   if (state.page === 'demandas') return renderDemandas(main);
-  if (state.page === 'estrategia') return renderEstrategia(main);
+}
+
+// ---------- Context menu (clique direito) ----------
+function showContextMenu(x, y, items) {
+  const root = document.getElementById('ctx-menu-root');
+  const menuWidth = 200;
+  const left = Math.min(x, window.innerWidth - menuWidth - 12);
+  const top = Math.min(y, window.innerHeight - items.length * 34 - 24);
+  root.innerHTML = `
+    <div class="ctx-menu" style="left:${left}px; top:${top}px">
+      ${items.map((it, i) => `<div class="ctx-item ${it.danger ? 'danger' : ''}" data-i="${i}"><span class="ctx-icon">${it.icon || ''}</span>${escapeHtml(it.label)}</div>`).join('')}
+    </div>
+  `;
+  root.querySelectorAll('.ctx-item').forEach((el, i) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      closeContextMenu();
+      items[i].onClick();
+    };
+  });
+  setTimeout(() => document.addEventListener('click', closeContextMenu, { once: true }), 0);
+}
+function closeContextMenu() {
+  const root = document.getElementById('ctx-menu-root');
+  if (root) root.innerHTML = '';
 }
 
 // ---------- Dashboard ----------
@@ -199,7 +236,14 @@ function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// ---------- Clientes ----------
+function initials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+// ---------- Clientes (galeria estilo Notion) ----------
 function renderClientes(main) {
   main.innerHTML = `
     <div class="page-header">
@@ -209,38 +253,38 @@ function renderClientes(main) {
       </div>
       <button class="btn" id="btn-new-client">+ Novo cliente</button>
     </div>
-    <div class="card-list" id="client-list"></div>
+    <div class="clients-grid" id="client-grid"></div>
   `;
   document.getElementById('btn-new-client').onclick = () => openClientModal();
-  const list = document.getElementById('client-list');
+  const grid = document.getElementById('client-grid');
   if (!state.clients.length) {
-    list.innerHTML = '<div class="empty-state">Nenhum cliente cadastrado. Clique em "Novo cliente" para começar.</div>';
+    grid.innerHTML = '<div class="empty-state">Nenhum cliente cadastrado. Clique em "Novo cliente" para começar.</div>';
     return;
   }
-  list.innerHTML = state.clients.map((c) => {
+  grid.innerHTML = state.clients.map((c) => {
     const portalUrl = `${location.origin}/portal?slug=${c.portal_slug}`;
-    const metaParts = [c.segment, c.contact_name, c.contact_email].filter(Boolean);
+    const activeDemands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado').length;
+    const metaParts = [c.segment, c.contact_name].filter(Boolean);
     return `
-    <div class="client-card">
-      <div>
-        <div class="name">
-          <span class="tag tag-${c.color || 'default'} tag-lg">${escapeHtml(c.name)}</span>
-          <span class="badge ${c.status}">${c.status}</span>
-        </div>
-        ${metaParts.length ? `<div class="meta">${metaParts.map(escapeHtml).join(' · ')}</div>` : ''}
-        <div class="copy-link">Portal do cliente: <code>${portalUrl}</code> <a href="#" data-copy="${portalUrl}">copiar link</a></div>
+    <div class="client-tile" data-open="${c.id}">
+      <div class="ct-top">
+        <div class="ct-avatar tag-${c.color || 'default'}">${initials(c.name)}</div>
+        <span class="badge ${c.status}">${c.status}</span>
       </div>
-      <div class="actions">
-        <button class="btn small" data-open="${c.id}">Abrir</button>
-        <button class="btn secondary small" data-edit="${c.id}">Editar</button>
-        <button class="btn danger small" data-del="${c.id}">Excluir</button>
+      <div class="ct-name">${escapeHtml(c.name)}</div>
+      <div class="ct-meta">${metaParts.length ? escapeHtml(metaParts.join(' · ')) : `${activeDemands} demanda${activeDemands === 1 ? '' : 's'} ativa${activeDemands === 1 ? '' : 's'}`}</div>
+      <div class="ct-actions">
+        <button class="icon-btn" data-edit="${c.id}" title="Editar">✏️</button>
+        <button class="icon-btn" data-copy="${portalUrl}" title="Copiar link do portal">🔗</button>
+        <button class="icon-btn danger" data-del="${c.id}" title="Excluir">🗑</button>
       </div>
     </div>`;
   }).join('');
 
-  list.querySelectorAll('[data-open]').forEach((btn) => {
-    btn.onclick = async () => {
-      state.currentClientId = btn.dataset.open;
+  grid.querySelectorAll('.client-tile').forEach((tile) => {
+    tile.onclick = async (e) => {
+      if (e.target.closest('.icon-btn')) return;
+      state.currentClientId = tile.dataset.open;
       state.currentPageId = null;
       state.page = 'cliente-detail';
       document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
@@ -248,23 +292,25 @@ function renderClientes(main) {
       render();
     };
   });
-  list.querySelectorAll('[data-edit]').forEach((btn) => {
-    btn.onclick = () => openClientModal(state.clients.find((c) => c.id === btn.dataset.edit));
+  grid.querySelectorAll('[data-edit]').forEach((btn) => {
+    btn.onclick = (e) => { e.stopPropagation(); openClientModal(state.clients.find((c) => c.id === btn.dataset.edit)); };
   });
-  list.querySelectorAll('[data-del]').forEach((btn) => {
-    btn.onclick = async () => {
-      if (!confirm('Excluir este cliente e todas as demandas/estratégias/páginas vinculadas?')) return;
+  grid.querySelectorAll('[data-del]').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm('Excluir este cliente e todas as demandas/páginas vinculadas?')) return;
       await api('/clients/' + btn.dataset.del, { method: 'DELETE' });
       await loadAll();
       render();
     };
   });
-  list.querySelectorAll('[data-copy]').forEach((a) => {
-    a.onclick = (e) => {
-      e.preventDefault();
-      navigator.clipboard.writeText(a.dataset.copy);
-      a.textContent = 'copiado!';
-      setTimeout(() => (a.textContent = 'copiar link'), 1500);
+  grid.querySelectorAll('[data-copy]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(btn.dataset.copy);
+      const original = btn.textContent;
+      btn.textContent = '✅';
+      setTimeout(() => (btn.textContent = original), 1200);
     };
   });
 }
@@ -288,6 +334,7 @@ function openClientModal(client) {
     <input type="email" id="f-contact-email" value="${escapeHtml(client.contact_email)}" style="width:100%" />
     <label>Notas</label>
     <textarea id="f-notes">${escapeHtml(client.notes)}</textarea>
+    ${!isEdit ? '<p style="color:var(--text-dim);font-size:12px;margin-top:10px">Assim que criado, o cliente já recebe a estrutura padrão: Calendário de Entrega, Planejamento e Brand Guide e Acessos.</p>' : ''}
     <div class="modal-footer">
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
       <button class="btn" id="btn-save">Salvar</button>
@@ -312,7 +359,7 @@ function openClientModal(client) {
   };
 }
 
-// ---------- Workspace do cliente (páginas/pastas estilo Notion) ----------
+// ---------- Workspace do cliente (páginas dentro de páginas, estilo Notion) ----------
 function buildPageTree(pages, parentId) {
   return pages
     .filter((p) => p.parent_id === parentId)
@@ -320,24 +367,36 @@ function buildPageTree(pages, parentId) {
     .map((p) => ({ ...p, children: buildPageTree(pages, p.id) }));
 }
 
+function flattenPages(nodes, depth, out) {
+  nodes.forEach((n) => {
+    out.push({ id: n.id, title: n.title, depth });
+    if (n.children && n.children.length) flattenPages(n.children, depth + 1, out);
+  });
+  return out;
+}
+
 function pageIcon(n) {
-  if (n.type === 'folder') return null; // tratado à parte (aberta/fechada)
+  if (n.type === 'folder') return '📁';
   if (n.type === 'calendar') return '📅';
   return '📄';
 }
 
 function renderPageTreeNodes(nodes, depth) {
   return nodes.map((n) => {
-    const isFolder = n.type === 'folder';
     const isOpen = state.expandedFolders.has(n.id);
     const isActive = state.currentPageId === n.id;
+    const hasChildren = n.children && n.children.length > 0;
     let html = `
-      <div class="page-tree-item ${isActive ? 'active' : ''}" data-id="${n.id}" data-type="${n.type}" style="padding-left:${10 + depth * 16}px">
-        <span class="ptree-icon">${isFolder ? (isOpen ? '📂' : '📁') : pageIcon(n)}</span>
-        <span class="ptree-title">${escapeHtml(n.title)}</span>
+      <div class="page-tree-row" style="padding-left:${depth * 14}px">
+        <span class="ptree-toggle" data-toggle="${n.id}">${hasChildren ? (isOpen ? '▾' : '▸') : ''}</span>
+        <span class="page-tree-item ${isActive ? 'active' : ''}" data-id="${n.id}" data-type="${n.type}">
+          <span class="ptree-icon">${pageIcon(n)}</span>
+          <span class="ptree-title">${escapeHtml(n.title)}</span>
+        </span>
+        <span class="ptree-add" data-addchild="${n.id}" title="Nova subpágina">+</span>
       </div>
     `;
-    if (isFolder && isOpen && n.children.length) {
+    if (hasChildren && isOpen) {
       html += renderPageTreeNodes(n.children, depth + 1);
     }
     return html;
@@ -352,7 +411,6 @@ function renderClienteDetail(main) {
   }
   const tree = buildPageTree(state.pages, null);
   const currentPage = state.pages.find((p) => p.id === state.currentPageId);
-  const folderOptions = [{ id: '', title: 'Raiz (sem pasta)' }, ...state.pages.filter((p) => p.type === 'folder').map((p) => ({ id: p.id, title: p.title }))];
 
   main.innerHTML = `
     <div class="page-header">
@@ -364,16 +422,7 @@ function renderClienteDetail(main) {
     </div>
     <div class="client-workspace">
       <div class="ptree-panel">
-        <div class="ptree-new">
-          <input type="text" id="new-page-title" placeholder="Nome da nova página/pasta" />
-          <select id="new-page-parent">
-            ${folderOptions.map((f) => `<option value="${f.id}">${escapeHtml(f.title)}</option>`).join('')}
-          </select>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <button class="btn secondary small" id="btn-new-page" style="flex:1">+ Página</button>
-            <button class="btn secondary small" id="btn-new-folder" style="flex:1">+ Pasta</button>
-          </div>
-        </div>
+        <button class="btn secondary small" id="btn-new-root-page" style="width:100%;margin-bottom:10px">+ Nova página</button>
         <div class="ptree-list" id="ptree-list">
           ${tree.length ? renderPageTreeNodes(tree, 0) : '<div class="empty-state" style="padding:16px">Nenhuma página ainda.</div>'}
         </div>
@@ -389,20 +438,28 @@ function renderClienteDetail(main) {
     render();
   };
 
-  document.getElementById('btn-new-page').onclick = () => createPage('page');
-  document.getElementById('btn-new-folder').onclick = () => createPage('folder');
+  document.getElementById('btn-new-root-page').onclick = () => quickCreatePage(null);
 
+  document.querySelectorAll('.ptree-toggle').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const id = el.dataset.toggle;
+      if (state.expandedFolders.has(id)) state.expandedFolders.delete(id);
+      else state.expandedFolders.add(id);
+      renderClienteDetail(main);
+    };
+  });
+  document.querySelectorAll('.ptree-add').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      quickCreatePage(el.dataset.addchild);
+    };
+  });
   document.querySelectorAll('.page-tree-item').forEach((el) => {
     el.onclick = () => {
       const id = el.dataset.id;
-      const type = el.dataset.type;
-      if (type === 'folder') {
-        if (state.expandedFolders.has(id)) state.expandedFolders.delete(id);
-        else state.expandedFolders.add(id);
-        state.currentPageId = id;
-      } else {
-        state.currentPageId = id;
-      }
+      state.currentPageId = id;
+      state.expandedFolders.add(id);
       renderClienteDetail(main);
     };
   });
@@ -410,25 +467,25 @@ function renderClienteDetail(main) {
   renderPageEditor(currentPage);
 }
 
-async function createPage(type) {
-  const title = document.getElementById('new-page-title').value.trim();
-  const parentId = document.getElementById('new-page-parent').value || null;
-  if (!title) return alert('Dê um nome para a página/pasta.');
+async function quickCreatePage(parentId) {
+  const title = prompt(parentId ? 'Nome da nova subpágina:' : 'Nome da nova página:');
+  if (!title || !title.trim()) return;
   const page = await api('/pages', {
     method: 'POST',
-    body: JSON.stringify({ client_id: state.currentClientId, parent_id: parentId, type, title }),
+    body: JSON.stringify({ client_id: state.currentClientId, parent_id: parentId, type: 'page', title: title.trim() }),
   });
   state.pages = await api('/pages?client_id=' + state.currentClientId);
   if (parentId) state.expandedFolders.add(parentId);
   state.currentPageId = page.id;
   render();
+  return page;
 }
 
 function renderPageEditor(page) {
   const editor = document.getElementById('page-editor');
   if (!editor) return;
   if (!page) {
-    editor.innerHTML = '<div class="empty-state">Selecione uma página à esquerda, ou crie uma nova.</div>';
+    editor.innerHTML = '<div class="empty-state">Selecione uma página à esquerda, ou crie uma nova. Dentro da página, use "/" para inserir títulos, listas, divisores ou uma subpágina.</div>';
     return;
   }
 
@@ -437,60 +494,132 @@ function renderPageEditor(page) {
     return;
   }
 
-  if (page.type === 'folder') {
-    const childCount = state.pages.filter((p) => p.parent_id === page.id).length;
-    editor.innerHTML = `
-      <div class="editor-toolbar">
-        <input type="text" id="page-title-input" value="${escapeHtml(page.title)}" />
-        <button class="btn danger small" id="btn-del-page">Excluir pasta</button>
-      </div>
-      <div class="empty-state">📁 Esta é uma pasta com ${childCount} item(ns) dentro. Crie páginas e selecione esta pasta como destino no painel à esquerda.</div>
-    `;
-    document.getElementById('page-title-input').onblur = (e) => savePageTitle(page, e.target.value);
-    document.getElementById('btn-del-page').onclick = () => deletePage(page);
-    return;
-  }
+  const children = state.pages.filter((p) => p.parent_id === page.id);
 
   editor.innerHTML = `
     <div class="editor-toolbar">
       <input type="text" id="page-title-input" value="${escapeHtml(page.title)}" />
-      <div class="rt-buttons">
-        <button type="button" data-cmd="bold"><b>B</b></button>
-        <button type="button" data-cmd="italic"><i>I</i></button>
-        <button type="button" data-cmd="underline"><u>U</u></button>
-        <button type="button" data-cmd="formatBlock" data-val="H2">H2</button>
-        <button type="button" data-cmd="formatBlock" data-val="H3">H3</button>
-        <button type="button" data-cmd="insertUnorderedList">• Lista</button>
-        <button type="button" data-cmd="insertOrderedList">1. Lista</button>
-        <button type="button" data-cmd="createLink">Link</button>
-      </div>
-      <div style="flex:1"></div>
-      <button class="btn small" id="btn-save-page">Salvar</button>
+      <span class="editor-status" id="editor-status"></span>
       <button class="btn danger small" id="btn-del-page">Excluir</button>
     </div>
     <div class="page-content" id="page-content" contenteditable="true">${page.content || ''}</div>
-    <div class="editor-status" id="editor-status"></div>
+    <div class="page-children">
+      <div class="page-children-label">Subpáginas</div>
+      <div class="page-children-list">
+        ${children.map((c) => `<div class="page-child-chip" data-open="${c.id}">${pageIcon(c)} ${escapeHtml(c.title)}</div>`).join('')}
+        <div class="page-child-chip add" id="btn-add-subpage">+ Nova subpágina</div>
+      </div>
+    </div>
   `;
 
   const contentEl = document.getElementById('page-content');
-  editor.querySelectorAll('.rt-buttons button').forEach((btn) => {
-    btn.onclick = () => {
-      contentEl.focus();
-      const cmd = btn.dataset.cmd;
-      if (cmd === 'createLink') {
-        const url = prompt('URL do link:');
-        if (url) document.execCommand('createLink', false, url);
-      } else if (cmd === 'formatBlock') {
-        document.execCommand('formatBlock', false, btn.dataset.val);
-      } else {
-        document.execCommand(cmd, false, null);
+  const statusEl = document.getElementById('editor-status');
+
+  function flashSaved() {
+    statusEl.textContent = 'Salvo ✓';
+    statusEl.classList.add('show');
+    setTimeout(() => statusEl.classList.remove('show'), 1200);
+  }
+
+  const autosaveContent = debounce(async () => {
+    await api('/pages/' + page.id, { method: 'PUT', body: JSON.stringify({ content: contentEl.innerHTML }) });
+    const idx = state.pages.findIndex((p) => p.id === page.id);
+    if (idx > -1) state.pages[idx].content = contentEl.innerHTML;
+    flashSaved();
+  }, 500);
+
+  contentEl.addEventListener('input', autosaveContent);
+  contentEl.addEventListener('keydown', (e) => {
+    if (e.key === '/') {
+      e.preventDefault();
+      openSlashMenu(contentEl, page, autosaveContent);
+    } else if (e.key === 'Escape') {
+      closeSlashMenu();
+    }
+  });
+  contentEl.addEventListener('click', (e) => {
+    const chip = e.target.closest('.page-chip');
+    if (chip) {
+      state.currentPageId = chip.dataset.pageId;
+      state.expandedFolders.add(page.id);
+      renderClienteDetail(document.getElementById('main'));
+    }
+  });
+
+  document.getElementById('page-title-input').addEventListener('input', debounce((e) => {
+    savePageTitle(page, e.target.value, flashSaved);
+  }, 500));
+  document.getElementById('btn-del-page').onclick = () => deletePage(page);
+  document.getElementById('btn-add-subpage').onclick = () => quickCreatePage(page.id);
+  editor.querySelectorAll('.page-child-chip[data-open]').forEach((chip) => {
+    chip.onclick = () => {
+      state.currentPageId = chip.dataset.open;
+      state.expandedFolders.add(page.id);
+      renderClienteDetail(document.getElementById('main'));
+    };
+  });
+}
+
+// Menu "/" estilo Notion, disparado dentro do editor de páginas.
+function openSlashMenu(contentEl, page, autosaveContent) {
+  closeSlashMenu();
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  const savedRange = sel.getRangeAt(0).cloneRange();
+  let rect = savedRange.getBoundingClientRect();
+  if (!rect || (rect.top === 0 && rect.left === 0)) rect = contentEl.getBoundingClientRect();
+
+  const root = document.getElementById('ctx-menu-root');
+  root.innerHTML = `
+    <div class="slash-menu" style="left:${rect.left}px; top:${rect.bottom + 6}px">
+      ${SLASH_ITEMS.map((it, i) => `
+        <div class="slash-item" data-i="${i}">
+          <span class="slash-icon">${it.icon}</span>
+          <div><div class="slash-label">${it.label}</div><div class="slash-hint">${it.hint}</div></div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
+  const restore = () => {
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+    contentEl.focus();
+  };
+
+  root.querySelectorAll('.slash-item').forEach((el, i) => {
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      const item = SLASH_ITEMS[i];
+      closeSlashMenu();
+      restore();
+      if (item.key === 'h2') document.execCommand('formatBlock', false, 'H2');
+      else if (item.key === 'h3') document.execCommand('formatBlock', false, 'H3');
+      else if (item.key === 'ul') document.execCommand('insertUnorderedList');
+      else if (item.key === 'ol') document.execCommand('insertOrderedList');
+      else if (item.key === 'quote') document.execCommand('formatBlock', false, 'BLOCKQUOTE');
+      else if (item.key === 'divider') document.execCommand('insertHTML', false, '<hr/>');
+      else if (item.key === 'subpage') {
+        const title = prompt('Nome da nova subpágina:');
+        if (title && title.trim()) {
+          const newPage = await api('/pages', {
+            method: 'POST',
+            body: JSON.stringify({ client_id: state.currentClientId, parent_id: page.id, type: 'page', title: title.trim() }),
+          });
+          state.pages = await api('/pages?client_id=' + state.currentClientId);
+          document.execCommand('insertHTML', false, `<span class="page-chip" contenteditable="false" data-page-id="${newPage.id}">📄 ${escapeHtml(title.trim())}</span>&nbsp;`);
+          state.expandedFolders.add(page.id);
+        }
       }
+      autosaveContent();
     };
   });
 
-  document.getElementById('btn-save-page').onclick = () => savePageContent(page, contentEl.innerHTML, document.getElementById('page-title-input').value);
-  document.getElementById('page-title-input').onblur = (e) => savePageTitle(page, e.target.value);
-  document.getElementById('btn-del-page').onclick = () => deletePage(page);
+  setTimeout(() => document.addEventListener('click', closeSlashMenu, { once: true }), 0);
+}
+function closeSlashMenu() {
+  const root = document.getElementById('ctx-menu-root');
+  if (root && root.querySelector('.slash-menu')) root.innerHTML = '';
 }
 
 // Página "Calendário de Entrega": gerada ao vivo a partir das demandas do cliente.
@@ -543,24 +672,17 @@ function renderCalendarPage(editor, page) {
   `;
 }
 
-async function savePageContent(page, content, title) {
-  await api('/pages/' + page.id, { method: 'PUT', body: JSON.stringify({ content, title }) });
-  state.pages = await api('/pages?client_id=' + state.currentClientId);
-  const status = document.getElementById('editor-status');
-  if (status) {
-    status.textContent = 'Salvo ✓';
-    setTimeout(() => { if (status) status.textContent = ''; }, 1500);
-  }
-}
-
-async function savePageTitle(page, title) {
+async function savePageTitle(page, title, flashSaved) {
   if (!title.trim() || title === page.title) return;
   await api('/pages/' + page.id, { method: 'PUT', body: JSON.stringify({ title: title.trim() }) });
-  state.pages = await api('/pages?client_id=' + state.currentClientId);
+  page.title = title.trim();
+  const idx = state.pages.findIndex((p) => p.id === page.id);
+  if (idx > -1) state.pages[idx].title = title.trim();
+  if (flashSaved) flashSaved();
 }
 
 async function deletePage(page) {
-  if (!confirm(`Excluir "${page.title}"${page.type === 'folder' ? ' e tudo que estiver dentro dela' : ''}?`)) return;
+  if (!confirm(`Excluir "${page.title}"${state.pages.some((p) => p.parent_id === page.id) ? ' e todas as subpáginas' : ''}?`)) return;
   await api('/pages/' + page.id, { method: 'DELETE' });
   state.pages = await api('/pages?client_id=' + state.currentClientId);
   state.currentPageId = null;
@@ -568,9 +690,76 @@ async function deletePage(page) {
 }
 
 // ---------- Demandas (Kanban vivo — fluxo WAS) ----------
-function renderDemandas(main) {
+function filtersActiveCount() {
+  return Object.values(state.filters).reduce((n, s) => n + s.size, 0);
+}
+
+function applyFilters(list) {
+  const f = state.filters;
+  return list.filter((d) => {
+    if (f.client.size && !f.client.has(d.client_id)) return false;
+    if (f.priority.size && !f.priority.has(d.priority)) return false;
+    if (f.responsible.size && !f.responsible.has(d.responsible)) return false;
+    if (f.format.size && !(d.format || []).some((v) => f.format.has(v))) return false;
+    if (f.platform.size && !(d.platform || []).some((v) => f.platform.has(v))) return false;
+    return true;
+  });
+}
+
+function renderFiltersPanel() {
+  const panel = document.getElementById('filters-panel');
+  if (!panel) return;
+  if (!state.filtersPanelOpen) { panel.innerHTML = ''; panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+
   const responsibles = Array.from(new Set(state.demands.map((d) => d.responsible).filter(Boolean))).sort();
 
+  function group(title, key, options) {
+    return `
+      <div class="filter-group">
+        <div class="filter-group-title">${title}</div>
+        <div class="filter-options">
+          ${options.map((o) => `
+            <label class="filter-opt">
+              <input type="checkbox" data-key="${key}" value="${escapeHtml(o.value)}" ${state.filters[key].has(o.value) ? 'checked' : ''} />
+              ${o.label}
+            </label>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  panel.innerHTML = `
+    <div class="filters-dropdown">
+      ${group('Cliente', 'client', state.clients.map((c) => ({ value: c.id, label: escapeHtml(c.name) })))}
+      ${group('Formato', 'format', FORMATO_OPTIONS.map((o) => ({ value: o.name, label: escapeHtml(o.name) })))}
+      ${group('Plataforma', 'platform', PLATAFORMA_OPTIONS.map((o) => ({ value: o.name, label: escapeHtml(o.name) })))}
+      ${group('Prioridade', 'priority', PRIORIDADE_OPTIONS.map((o) => ({ value: o.key, label: o.label })))}
+      ${responsibles.length ? group('Responsável', 'responsible', responsibles.map((r) => ({ value: r, label: escapeHtml(r) }))) : ''}
+      <div class="filters-footer">
+        <a href="#" id="filters-clear">Limpar tudo</a>
+      </div>
+    </div>
+  `;
+
+  panel.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+    cb.onchange = () => {
+      const key = cb.dataset.key;
+      if (cb.checked) state.filters[key].add(cb.value);
+      else state.filters[key].delete(cb.value);
+      renderDemandas(document.getElementById('main'));
+    };
+  });
+  const clearLink = document.getElementById('filters-clear');
+  if (clearLink) clearLink.onclick = (e) => {
+    e.preventDefault();
+    Object.keys(state.filters).forEach((k) => state.filters[k].clear());
+    renderDemandas(document.getElementById('main'));
+  };
+}
+
+function renderDemandas(main) {
   main.innerHTML = `
     <div class="page-header">
       <div>
@@ -580,30 +769,27 @@ function renderDemandas(main) {
       <button class="btn" id="btn-new-demand">+ Nova demanda</button>
     </div>
     <div class="toolbar">
-      <select id="filter-client">
-        <option value="">Todos os clientes</option>
-        ${state.clients.map((c) => `<option value="${c.id}" ${state.demandClientFilter === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
-      </select>
-      <select id="filter-resp">
-        <option value="">Todos os responsáveis</option>
-        ${responsibles.map((r) => `<option value="${escapeHtml(r)}" ${state.demandRespFilter === r ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}
-      </select>
-      <select id="filter-priority">
-        <option value="">Todas as prioridades</option>
-        ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${state.demandPriorityFilter === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
-      </select>
+      <div class="filters-wrap">
+        <button class="btn secondary small" id="btn-toggle-filters">🔎 Filtros ${filtersActiveCount() ? `<span class="filter-count">${filtersActiveCount()}</span>` : ''}</button>
+        <div id="filters-panel" class="filters-panel"></div>
+      </div>
     </div>
     <div class="kanban" id="kanban"></div>
   `;
   document.getElementById('btn-new-demand').onclick = () => openDemandModal();
-  document.getElementById('filter-client').onchange = (e) => { state.demandClientFilter = e.target.value; renderDemandas(main); };
-  document.getElementById('filter-resp').onchange = (e) => { state.demandRespFilter = e.target.value; renderDemandas(main); };
-  document.getElementById('filter-priority').onchange = (e) => { state.demandPriorityFilter = e.target.value; renderDemandas(main); };
+  document.getElementById('btn-toggle-filters').onclick = (e) => {
+    e.stopPropagation();
+    state.filtersPanelOpen = !state.filtersPanelOpen;
+    renderFiltersPanel();
+    if (state.filtersPanelOpen) {
+      setTimeout(() => document.addEventListener('click', (ev) => {
+        if (!ev.target.closest('.filters-wrap')) { state.filtersPanelOpen = false; renderFiltersPanel(); }
+      }, { once: true }), 0);
+    }
+  };
+  renderFiltersPanel();
 
-  let filtered = state.demands;
-  if (state.demandClientFilter) filtered = filtered.filter((d) => d.client_id === state.demandClientFilter);
-  if (state.demandRespFilter) filtered = filtered.filter((d) => d.responsible === state.demandRespFilter);
-  if (state.demandPriorityFilter) filtered = filtered.filter((d) => d.priority === state.demandPriorityFilter);
+  const filtered = applyFilters(state.demands);
 
   const kanban = document.getElementById('kanban');
   kanban.innerHTML = STAGES.map((stage) => {
@@ -649,7 +835,22 @@ function renderDemandas(main) {
   });
 
   kanban.querySelectorAll('.demand-card').forEach((el) => {
-    el.onclick = () => openDemandModal(state.demands.find((d) => d.id === el.dataset.id));
+    const demand = state.demands.find((d) => d.id === el.dataset.id);
+    el.onclick = () => openDemandModal(demand);
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showContextMenu(e.pageX, e.pageY, [
+        { label: 'Abrir', icon: '✏️', onClick: () => openDemandModal(demand) },
+        {
+          label: 'Excluir demanda', icon: '🗑', danger: true, onClick: async () => {
+            if (!confirm(`Excluir "${demand.title}"?`)) return;
+            await api('/demands/' + demand.id, { method: 'DELETE' });
+            await loadAll();
+            render();
+          },
+        },
+      ]);
+    });
     el.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/plain', el.dataset.id);
       el.classList.add('dragging');
@@ -701,18 +902,14 @@ function renderDemandCard(d) {
   `;
 }
 
+// Modal de demanda: criação rápida (mínima) -> depois autosave campo a campo, sem botão "Salvar".
 function openDemandModal(demand) {
-  const isEdit = !!demand;
-  demand = demand || {
-    client_id: state.demandClientFilter || (state.clients[0] ? state.clients[0].id : ''),
-    title: '', description: '', briefing: '', format: [], platform: [], status: 'em_briefing',
-    needs_capture: true, capture_date: '',
-    prazo_designer: '', prazo_final: '', responsible: '', priority: 'normal',
-    forecast: 'prevista', refacao: '', visible_to_client: false, link: '',
-  };
-  if (!state.clients.length) return alert('Cadastre um cliente antes de criar demandas.');
+  if (!demand) return openQuickCreateDemand();
+
   showModal(`
-    <h2>${isEdit ? 'Editar demanda' : 'Nova demanda'}</h2>
+    <h2>${escapeHtml(demand.title) || 'Demanda'}</h2>
+    <div class="autosave-line">Alterações são salvas automaticamente <span id="autosave-indicator" class="autosave-indicator"></span></div>
+
     <label>Projeto / Cliente</label>
     <select id="f-client" style="width:100%">
       ${state.clients.map((c) => `<option value="${c.id}" ${demand.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
@@ -804,164 +1001,97 @@ function openDemandModal(demand) {
       Visível no portal do cliente
     </label>
     <div class="modal-footer">
-      ${isEdit ? '<button class="btn danger" id="btn-delete" style="margin-right:auto">Excluir</button>' : ''}
-      <button class="btn secondary" id="btn-cancel">Cancelar</button>
-      <button class="btn" id="btn-save">Salvar</button>
+      <button class="btn danger" id="btn-delete" style="margin-right:auto">Excluir</button>
+      <button class="btn" id="btn-close">Fechar</button>
     </div>
   `);
+
+  const indicator = document.getElementById('autosave-indicator');
+  function flashSaved() {
+    indicator.textContent = 'Salvo ✓';
+    indicator.classList.add('show');
+    setTimeout(() => indicator.classList.remove('show'), 1200);
+  }
+  async function patch(payload) {
+    await api('/demands/' + demand.id, { method: 'PUT', body: JSON.stringify(payload) });
+    Object.assign(demand, payload);
+    const idx = state.demands.findIndex((d) => d.id === demand.id);
+    if (idx > -1) state.demands[idx] = { ...state.demands[idx], ...payload };
+    flashSaved();
+    if (state.page === 'demandas') renderDemandas(document.getElementById('main'));
+    if (state.page === 'dashboard') renderDashboard(document.getElementById('main'));
+  }
+  const patchDebounced = debounce(patch, 500);
+
+  document.getElementById('f-client').onchange = (e) => patch({ client_id: e.target.value });
+  document.getElementById('f-title').addEventListener('input', (e) => patchDebounced({ title: e.target.value.trim() }));
+  document.getElementById('f-briefing').addEventListener('input', (e) => patchDebounced({ briefing: e.target.value }));
+  document.getElementById('f-desc').addEventListener('input', (e) => patchDebounced({ description: e.target.value }));
+  document.getElementById('f-status').onchange = (e) => patch({ status: e.target.value });
+  document.getElementById('f-priority').onchange = (e) => patch({ priority: e.target.value });
+  document.getElementById('f-forecast').onchange = (e) => patch({ forecast: e.target.value });
+  document.getElementById('f-refacao').onchange = (e) => patch({ refacao: e.target.value });
+  document.getElementById('f-resp').addEventListener('input', (e) => patchDebounced({ responsible: e.target.value.trim() }));
+  document.getElementById('f-link').addEventListener('input', (e) => patchDebounced({ link: e.target.value.trim() }));
+  document.getElementById('f-visible').onchange = (e) => patch({ visible_to_client: e.target.checked });
+  document.getElementById('f-prazo-designer').onchange = (e) => patch({ prazo_designer: e.target.value });
+  document.getElementById('f-prazo-final').onchange = (e) => patch({ prazo_final: e.target.value });
   document.getElementById('f-needs-capture').onchange = (e) => {
     document.getElementById('capture-date-wrap').style.display = e.target.checked ? '' : 'none';
+    patch({ needs_capture: e.target.checked, capture_date: e.target.checked ? demand.capture_date : '' });
   };
-  document.getElementById('btn-cancel').onclick = closeModal;
-  if (isEdit) {
-    document.getElementById('btn-delete').onclick = async () => {
-      if (!confirm('Excluir esta demanda?')) return;
-      await api('/demands/' + demand.id, { method: 'DELETE' });
-      closeModal();
-      await loadAll();
-      render();
-    };
-  }
-  document.getElementById('btn-save').onclick = async () => {
-    const format = Array.from(document.querySelectorAll('#f-format input:checked')).map((i) => i.value);
-    const platform = Array.from(document.querySelectorAll('#f-platform input:checked')).map((i) => i.value);
-    const needsCapture = document.getElementById('f-needs-capture').checked;
-    const payload = {
-      client_id: document.getElementById('f-client').value,
-      title: document.getElementById('f-title').value.trim(),
-      briefing: document.getElementById('f-briefing').value.trim(),
-      description: document.getElementById('f-desc').value.trim(),
-      format,
-      platform,
-      status: document.getElementById('f-status').value,
-      needs_capture: needsCapture,
-      capture_date: needsCapture ? document.getElementById('f-capture-date').value : '',
-      prazo_designer: document.getElementById('f-prazo-designer').value,
-      prazo_final: document.getElementById('f-prazo-final').value,
-      responsible: document.getElementById('f-resp').value.trim(),
-      priority: document.getElementById('f-priority').value,
-      forecast: document.getElementById('f-forecast').value,
-      refacao: document.getElementById('f-refacao').value,
-      link: document.getElementById('f-link').value.trim(),
-      visible_to_client: document.getElementById('f-visible').checked,
-    };
-    if (!payload.title) return alert('Informe o nome da demanda.');
-    if (isEdit) await api('/demands/' + demand.id, { method: 'PUT', body: JSON.stringify(payload) });
-    else await api('/demands', { method: 'POST', body: JSON.stringify(payload) });
+  document.getElementById('f-capture-date').onchange = (e) => patch({ capture_date: e.target.value });
+
+  document.querySelectorAll('#f-format input').forEach((cb) => {
+    cb.onchange = () => patch({ format: Array.from(document.querySelectorAll('#f-format input:checked')).map((i) => i.value) });
+  });
+  document.querySelectorAll('#f-platform input').forEach((cb) => {
+    cb.onchange = () => patch({ platform: Array.from(document.querySelectorAll('#f-platform input:checked')).map((i) => i.value) });
+  });
+
+  document.getElementById('btn-close').onclick = closeModal;
+  document.getElementById('btn-delete').onclick = async () => {
+    if (!confirm('Excluir esta demanda?')) return;
+    await api('/demands/' + demand.id, { method: 'DELETE' });
     closeModal();
     await loadAll();
     render();
   };
 }
 
-// ---------- Estratégia ----------
-function renderEstrategia(main) {
-  main.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1>Estratégia</h1>
-        <p>Planejamento e diretrizes por cliente</p>
-      </div>
-      <button class="btn" id="btn-new-strat">+ Novo documento</button>
-    </div>
-    <div class="toolbar">
-      <select id="filter-client">
-        <option value="">Todos os clientes</option>
-        ${state.clients.map((c) => `<option value="${c.id}" ${state.stratClientFilter === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
-      </select>
-    </div>
-    <div id="strat-list"></div>
-  `;
-  document.getElementById('btn-new-strat').onclick = () => openStrategyModal();
-  document.getElementById('filter-client').onchange = (e) => {
-    state.stratClientFilter = e.target.value;
-    renderEstrategia(main);
-  };
-
-  const filtered = state.stratClientFilter
-    ? state.strategies.filter((s) => s.client_id === state.stratClientFilter)
-    : state.strategies;
-
-  const list = document.getElementById('strat-list');
-  if (!filtered.length) {
-    list.innerHTML = '<div class="empty-state">Nenhum documento de estratégia ainda.</div>';
-    return;
-  }
-  list.innerHTML = filtered.map((s) => `
-    <div class="strategy-doc">
-      <h3>${escapeHtml(s.title)} ${s.visible_to_client ? '<span class="badge ativo">visível ao cliente</span>' : ''}</h3>
-      <div class="meta">${escapeHtml(clientName(s.client_id))} ${s.period ? '· ' + escapeHtml(s.period) : ''} · atualizado em ${new Date(s.updated_at).toLocaleDateString('pt-BR')}</div>
-      <div class="content">${escapeHtml(s.content)}</div>
-      <div class="modal-footer" style="margin-top:14px">
-        <button class="btn secondary small" data-edit="${s.id}">Editar</button>
-        <button class="btn danger small" data-del="${s.id}">Excluir</button>
-      </div>
-    </div>
-  `).join('');
-
-  list.querySelectorAll('[data-edit]').forEach((btn) => {
-    btn.onclick = () => openStrategyModal(state.strategies.find((s) => s.id === btn.dataset.edit));
-  });
-  list.querySelectorAll('[data-del]').forEach((btn) => {
-    btn.onclick = async () => {
-      if (!confirm('Excluir este documento de estratégia?')) return;
-      await api('/strategies/' + btn.dataset.del, { method: 'DELETE' });
-      await loadAll();
-      render();
-    };
-  });
-}
-
-function openStrategyModal(strat) {
-  const isEdit = !!strat;
-  strat = strat || { client_id: state.stratClientFilter || (state.clients[0] ? state.clients[0].id : ''), title: '', period: '', content: '', visible_to_client: false };
-  if (!state.clients.length) return alert('Cadastre um cliente antes de criar estratégias.');
+function openQuickCreateDemand() {
+  if (!state.clients.length) return alert('Cadastre um cliente antes de criar demandas.');
   showModal(`
-    <h2>${isEdit ? 'Editar estratégia' : 'Novo documento de estratégia'}</h2>
-    <label>Cliente</label>
-    <select id="f-client" style="width:100%">
-      ${state.clients.map((c) => `<option value="${c.id}" ${strat.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+    <h2>Nova demanda</h2>
+    <label>Projeto / Cliente</label>
+    <select id="qc-client" style="width:100%">
+      ${state.clients.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}
     </select>
-    <label>Título</label>
-    <input type="text" id="f-title" value="${escapeHtml(strat.title)}" style="width:100%" />
-    <label>Período (ex: 2026-08)</label>
-    <input type="text" id="f-period" value="${escapeHtml(strat.period)}" style="width:100%" />
-    <label>Conteúdo</label>
-    <textarea id="f-content" style="min-height:180px">${escapeHtml(strat.content)}</textarea>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
-      <input type="checkbox" id="f-visible" ${strat.visible_to_client ? 'checked' : ''} style="width:auto" />
-      Visível no portal do cliente
-    </label>
+    <label>Demanda</label>
+    <input type="text" id="qc-title" style="width:100%" placeholder="ex: Reels de lançamento" />
+    <p style="color:var(--text-dim);font-size:12px;margin-top:10px">Depois de criada, os demais campos (briefing, formato, prazos, etc.) salvam automaticamente conforme você edita.</p>
     <div class="modal-footer">
-      ${isEdit ? '<button class="btn danger" id="btn-delete" style="margin-right:auto">Excluir</button>' : ''}
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
-      <button class="btn" id="btn-save">Salvar</button>
+      <button class="btn" id="btn-create">Criar demanda</button>
     </div>
   `);
   document.getElementById('btn-cancel').onclick = closeModal;
-  if (isEdit) {
-    document.getElementById('btn-delete').onclick = async () => {
-      if (!confirm('Excluir este documento?')) return;
-      await api('/strategies/' + strat.id, { method: 'DELETE' });
-      closeModal();
-      await loadAll();
-      render();
-    };
-  }
-  document.getElementById('btn-save').onclick = async () => {
+  document.getElementById('btn-create').onclick = async () => {
+    const title = document.getElementById('qc-title').value.trim();
+    if (!title) return alert('Informe o nome da demanda.');
     const payload = {
-      client_id: document.getElementById('f-client').value,
-      title: document.getElementById('f-title').value.trim(),
-      period: document.getElementById('f-period').value.trim(),
-      content: document.getElementById('f-content').value,
-      visible_to_client: document.getElementById('f-visible').checked,
+      client_id: document.getElementById('qc-client').value,
+      title,
+      format: [], platform: [],
+      status: 'em_briefing',
+      needs_capture: true,
+      priority: 'normal',
+      forecast: 'prevista',
     };
-    if (!payload.title) return alert('Informe o título.');
-    if (isEdit) await api('/strategies/' + strat.id, { method: 'PUT', body: JSON.stringify(payload) });
-    else await api('/strategies', { method: 'POST', body: JSON.stringify(payload) });
-    closeModal();
+    const created = await api('/demands', { method: 'POST', body: JSON.stringify(payload) });
     await loadAll();
     render();
+    openDemandModal(state.demands.find((d) => d.id === created.id) || created);
   };
 }
 
@@ -975,6 +1105,7 @@ function showModal(html) {
 }
 function closeModal() {
   document.getElementById('modal-root').innerHTML = '';
+  closeContextMenu();
 }
 
 // ---------- Init ----------

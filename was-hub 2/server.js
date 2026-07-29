@@ -71,8 +71,29 @@ const DEFAULT_PAGES = [
 const STATUS_RENAME = { nao_utilizado: 'arquivado' };
 
 // ---------- Persistência ----------
+function emptyTenant(name, slug) {
+  return {
+    id: id(), name, slug, plan: 'free', created_at: new Date().toISOString(),
+    users: [], clients: [], demands: [], strategies: [], pages: [], team: [],
+    automations: [], customColumns: [], viewPrefs: { tableColumnOrder: [] },
+  };
+}
+
 function emptyDB() {
-  return { clients: [], demands: [], strategies: [], pages: [], team: [], automations: [], customColumns: [], viewPrefs: { tableColumnOrder: [] } };
+  return { tenants: {} };
+}
+
+function ensureTenantShape(t) {
+  if (!t.pages) t.pages = [];
+  if (!t.clients) t.clients = [];
+  if (!t.demands) t.demands = [];
+  if (!t.strategies) t.strategies = [];
+  if (!t.team) t.team = [];
+  if (!t.automations) t.automations = [];
+  if (!t.customColumns) t.customColumns = [];
+  if (!t.viewPrefs) t.viewPrefs = { tableColumnOrder: [] };
+  if (!t.users) t.users = [];
+  if (!t.plan) t.plan = 'free';
 }
 
 function loadDB() {
@@ -83,25 +104,112 @@ function loadDB() {
   } else {
     db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
   }
-  if (!db.pages) db.pages = [];
-  if (!db.clients) db.clients = [];
-  if (!db.demands) db.demands = [];
-  if (!db.strategies) db.strategies = [];
-  if (!db.team) db.team = [];
-  if (!db.automations) db.automations = [];
-  if (!db.customColumns) db.customColumns = [];
-  if (!db.viewPrefs) db.viewPrefs = { tableColumnOrder: [] };
+  if (!db.tenants) db.tenants = {};
 
-  ensureRoster(db);
-  ensureTeam(db);
-  ensureDefaultPagesForAllClients(db);
-  migrateStatuses(db);
+  // migração: arquivo do formato antigo (single-tenant, sem "tenants") vira o tenant "was"
+  if (Array.isArray(db.clients) || Array.isArray(db.demands) || Array.isArray(db.team)) {
+    const legacy = {
+      id: 'was', name: 'We Are Sinergy', slug: 'was', plan: 'agency', created_at: new Date().toISOString(),
+      users: [],
+      clients: db.clients || [], demands: db.demands || [], strategies: db.strategies || [], pages: db.pages || [],
+      team: db.team || [], automations: db.automations || [], customColumns: db.customColumns || [],
+      viewPrefs: db.viewPrefs || { tableColumnOrder: [] },
+    };
+    delete db.clients; delete db.demands; delete db.strategies; delete db.pages; delete db.team;
+    delete db.automations; delete db.customColumns; delete db.viewPrefs;
+    db.tenants.was = legacy;
+  }
+
+  if (!db.tenants.was) {
+    db.tenants.was = emptyTenant('We Are Sinergy', 'was');
+    db.tenants.was.id = 'was';
+    db.tenants.was.plan = 'agency';
+  }
+
+  // roster/equipe real da WAS — só é aplicado ao tenant "was", nunca a tenants criados via cadastro público
+  ensureTenantShape(db.tenants.was);
+  ensureRoster(db.tenants.was);
+  ensureTeam(db.tenants.was);
+
+  Object.values(db.tenants).forEach((t) => {
+    ensureTenantShape(t);
+    ensureDefaultPagesForAllClients(t);
+    migrateStatuses(t);
+    ensureUsersFromTeam(t); // garante login individual (senha padrão 1234) pra cada membro da equipe
+  });
+
   saveDB(db); // idempotente — garante que o arquivo sempre existe, mesmo na primeira vez
   return db;
 }
 
 function saveDB(db) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
+}
+
+// ---------- Autenticação ----------
+function hashPassword(password) {
+  return crypto.createHash('sha256').update('was-hub-salt-v1:' + password).digest('hex');
+}
+
+function verifyPassword(password, hash) {
+  return hashPassword(password) === hash;
+}
+
+function ensureUsersFromTeam(tenant) {
+  const existingNames = new Set(tenant.users.map((u) => u.name.trim().toLowerCase()));
+  tenant.team.forEach((t) => {
+    if (existingNames.has(t.name.trim().toLowerCase())) return;
+    tenant.users.push({
+      id: id(),
+      name: t.name,
+      email: null,
+      passwordHash: hashPassword('1234'),
+      role: (t.roles || []).includes('Coringa') ? 'admin' : 'member',
+      team_member_id: t.id,
+      created_at: new Date().toISOString(),
+    });
+  });
+}
+
+const sessions = new Map(); // token -> { tenantId, userId, createdAt }
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header) return out;
+  header.split(';').forEach((pair) => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+function getSession(req) {
+  const token = parseCookies(req).was_session;
+  if (!token) return null;
+  const sess = sessions.get(token);
+  if (!sess) return null;
+  return { token, ...sess };
+}
+
+function createSession(tenantId, userId) {
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, { tenantId, userId, createdAt: Date.now() });
+  return token;
+}
+
+function setSessionCookie(res, token) {
+  const maxAge = 60 * 60 * 24 * 30;
+  res.setHeader('Set-Cookie', `was_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', 'was_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+}
+
+function publicUser(u, tenant) {
+  return { id: u.id, name: u.name, email: u.email, role: u.role, tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, tenantPlan: tenant.plan };
 }
 
 function id() {
@@ -222,7 +330,7 @@ function matchTrigger(demand, trigger) {
 function applyAutomations(db, demand) {
   (db.automations || []).forEach((auto) => {
     if (!auto.active) return;
-    if (auto.kind === 'deadline' || auto.kind === 'weekly_summary') return; // alertas de prazo e resumo semanal sao so informativos, nao alteram campos
+    if (auto.kind === 'deadline' || auto.kind === 'weekly_summary' || auto.kind === 'stage_alert') return; // alertas (prazo, resumo semanal, mudanca de fase) sao so informativos, nao alteram campos
     if (matchTrigger(demand, auto.trigger)) {
       demand[auto.action.field] = auto.action.value;
     }
@@ -268,6 +376,8 @@ const MIME = {
 function serveStatic(req, res, pathname) {
   let filePath = pathname === '/' ? '/index.html' : pathname;
   if (filePath === '/portal') filePath = '/portal.html';
+  if (filePath === '/login') filePath = '/login.html';
+  if (filePath === '/signup') filePath = '/signup.html';
   filePath = path.join(PUBLIC_DIR, filePath);
 
   if (!filePath.startsWith(PUBLIC_DIR)) {
@@ -288,22 +398,100 @@ function serveStatic(req, res, pathname) {
 
 // ---------- API ----------
 async function handleAPI(req, res, pathname, query) {
-  const db = loadDB();
+  const root = loadDB();
   const method = req.method;
   const parts = pathname.split('/').filter(Boolean); // ['api','clients', ':id']
-  const resource = parts[1]; // clients | demands | strategies | pages | team | automations | portal
+  const resource = parts[1]; // clients | demands | strategies | pages | team | automations | portal | auth
   const resId = parts[2];
 
   try {
-    // ---- PORTAL (leitura, filtrada por slug do cliente) ----
+    // ---- PORTAL (leitura pública, filtrada por slug do cliente — procura em todos os tenants) ----
     if (resource === 'portal' && method === 'GET') {
       const slug = resId;
-      const client = db.clients.find((c) => c.portal_slug === slug);
+      let client = null, tenant = null;
+      for (const t of Object.values(root.tenants)) {
+        const c = t.clients.find((c) => c.portal_slug === slug);
+        if (c) { client = c; tenant = t; break; }
+      }
       if (!client) return sendJSON(res, 404, { error: 'Cliente não encontrado' });
-      const demands = db.demands.filter((d) => d.client_id === client.id && d.visible_to_client && d.status !== 'arquivado');
-      const strategies = db.strategies.filter((s) => s.client_id === client.id && s.visible_to_client);
+      const demands = tenant.demands.filter((d) => d.client_id === client.id && d.visible_to_client && d.status !== 'arquivado');
+      const strategies = tenant.strategies.filter((s) => s.client_id === client.id && s.visible_to_client);
       return sendJSON(res, 200, { client, demands, strategies });
     }
+
+    // ---- AUTH (login / logout / cadastro público / usuário atual) ----
+    if (resource === 'auth') {
+      if (resId === 'login' && method === 'POST') {
+        const body = await readBody(req);
+        const email = (body.email || '').trim().toLowerCase();
+        const password = body.password || '';
+        let found = null, foundTenant = null;
+        for (const t of Object.values(root.tenants)) {
+          const u = t.users.find((u) => u.name.trim().toLowerCase() === email || (u.email || '').trim().toLowerCase() === email);
+          if (u) { found = u; foundTenant = t; break; }
+        }
+        if (!found || !verifyPassword(password, found.passwordHash)) {
+          return sendJSON(res, 401, { error: 'E-mail/usuário ou senha inválidos' });
+        }
+        const token = createSession(foundTenant.id, found.id);
+        setSessionCookie(res, token);
+        return sendJSON(res, 200, { user: publicUser(found, foundTenant) });
+      }
+      if (resId === 'logout' && method === 'POST') {
+        const session = getSession(req);
+        if (session) sessions.delete(session.token);
+        clearSessionCookie(res);
+        return sendJSON(res, 200, { ok: true });
+      }
+      if (resId === 'signup' && method === 'POST') {
+        const body = await readBody(req);
+        const companyName = (body.companyName || '').trim();
+        const userName = (body.userName || '').trim();
+        const email = (body.email || '').trim().toLowerCase();
+        const password = body.password || '';
+        if (!companyName || !userName || !email || !password) {
+          return sendJSON(res, 400, { error: 'Preencha todos os campos.' });
+        }
+        if (password.length < 4) {
+          return sendJSON(res, 400, { error: 'A senha precisa ter pelo menos 4 caracteres.' });
+        }
+        const emailTaken = Object.values(root.tenants).some((t) => t.users.some((u) => (u.email || '').trim().toLowerCase() === email));
+        if (emailTaken) return sendJSON(res, 400, { error: 'Já existe uma conta com esse e-mail.' });
+
+        const tenant = emptyTenant(companyName, slugify(companyName));
+        tenant.plan = 'free';
+        const user = {
+          id: id(), name: userName, email, passwordHash: hashPassword(password), role: 'admin',
+          team_member_id: null, created_at: new Date().toISOString(),
+        };
+        const member = { id: id(), name: userName, roles: ['Coringa'], active: true, created_at: new Date().toISOString() };
+        user.team_member_id = member.id;
+        tenant.team.push(member);
+        tenant.users.push(user);
+        root.tenants[tenant.id] = tenant;
+        saveDB(root);
+
+        const token = createSession(tenant.id, user.id);
+        setSessionCookie(res, token);
+        return sendJSON(res, 201, { user: publicUser(user, tenant) });
+      }
+      if (resId === 'me' && method === 'GET') {
+        const session = getSession(req);
+        if (!session || !root.tenants[session.tenantId]) return sendJSON(res, 401, { error: 'Não autenticado' });
+        const tenant = root.tenants[session.tenantId];
+        const user = tenant.users.find((u) => u.id === session.userId);
+        if (!user) return sendJSON(res, 401, { error: 'Não autenticado' });
+        return sendJSON(res, 200, { user: publicUser(user, tenant) });
+      }
+      return sendJSON(res, 404, { error: 'Rota de autenticação não encontrada' });
+    }
+
+    // ---- a partir daqui, toda rota exige sessão válida ----
+    const session = getSession(req);
+    if (!session || !root.tenants[session.tenantId]) {
+      return sendJSON(res, 401, { error: 'Não autenticado' });
+    }
+    const db = root.tenants[session.tenantId];
 
     // ---- CLIENTS ----
     if (resource === 'clients') {
@@ -324,7 +512,7 @@ async function handleAPI(req, res, pathname, query) {
         };
         db.clients.push(client);
         createDefaultPages(db, client.id);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, client);
       }
       if (method === 'PUT' && resId) {
@@ -332,7 +520,7 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         db.clients[idx] = { ...db.clients[idx], ...body, id: resId };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.clients[idx]);
       }
       if (method === 'DELETE' && resId) {
@@ -340,7 +528,7 @@ async function handleAPI(req, res, pathname, query) {
         db.demands = db.demands.filter((d) => d.client_id !== resId);
         db.strategies = db.strategies.filter((s) => s.client_id !== resId);
         db.pages = db.pages.filter((p) => p.client_id !== resId);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -358,7 +546,7 @@ async function handleAPI(req, res, pathname, query) {
           created_at: new Date().toISOString(),
         };
         db.team.push(member);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, member);
       }
       if (method === 'PUT' && resId) {
@@ -366,12 +554,12 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         db.team[idx] = { ...db.team[idx], ...body, id: resId };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.team[idx]);
       }
       if (method === 'DELETE' && resId) {
         db.team = db.team.filter((t) => t.id !== resId);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -391,7 +579,7 @@ async function handleAPI(req, res, pathname, query) {
           created_at: new Date().toISOString(),
         };
         db.automations.push(auto);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, auto);
       }
       if (method === 'PUT' && resId) {
@@ -399,12 +587,12 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         db.automations[idx] = { ...db.automations[idx], ...body, id: resId };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.automations[idx]);
       }
       if (method === 'DELETE' && resId) {
         db.automations = db.automations.filter((a) => a.id !== resId);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -430,7 +618,7 @@ async function handleAPI(req, res, pathname, query) {
           updated_at: new Date().toISOString(),
         };
         db.pages.push(page);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, page);
       }
       if (method === 'PUT' && resId) {
@@ -438,7 +626,7 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         db.pages[idx] = { ...db.pages[idx], ...body, id: resId, updated_at: new Date().toISOString() };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.pages[idx]);
       }
       if (method === 'DELETE' && resId) {
@@ -454,7 +642,7 @@ async function handleAPI(req, res, pathname, query) {
           });
         }
         db.pages = db.pages.filter((p) => !toDelete.has(p.id));
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -492,7 +680,7 @@ async function handleAPI(req, res, pathname, query) {
         };
         demand = applyAutomations(db, demand);
         db.demands.push(demand);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, demand);
       }
       if (method === 'PUT' && resId) {
@@ -504,12 +692,12 @@ async function handleAPI(req, res, pathname, query) {
         let demand = { ...db.demands[idx], ...body, id: resId, custom_fields: mergedCustom };
         demand = applyAutomations(db, demand);
         db.demands[idx] = demand;
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.demands[idx]);
       }
       if (method === 'DELETE' && resId) {
         db.demands = db.demands.filter((d) => d.id !== resId);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -533,7 +721,7 @@ async function handleAPI(req, res, pathname, query) {
           updated_at: new Date().toISOString(),
         };
         db.strategies.push(strat);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, strat);
       }
       if (method === 'PUT' && resId) {
@@ -541,12 +729,12 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         db.strategies[idx] = { ...db.strategies[idx], ...body, id: resId, updated_at: new Date().toISOString() };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.strategies[idx]);
       }
       if (method === 'DELETE' && resId) {
         db.strategies = db.strategies.filter((s) => s.id !== resId);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -556,10 +744,18 @@ async function handleAPI(req, res, pathname, query) {
       if (method === 'GET' && !resId) return sendJSON(res, 200, db.customColumns);
       if (method === 'POST') {
         const body = await readBody(req);
-        const col = { id: id(), name: (body.name || 'Nova coluna').trim() || 'Nova coluna', type: 'text', created_at: new Date().toISOString() };
+        const validTypes = ['text', 'select', 'multi', 'date', 'number', 'checkbox'];
+        const type = validTypes.includes(body.type) ? body.type : 'text';
+        const col = {
+          id: id(),
+          name: (body.name || 'Nova coluna').trim() || 'Nova coluna',
+          type,
+          options: Array.isArray(body.options) ? body.options : [],
+          created_at: new Date().toISOString(),
+        };
         db.customColumns.push(col);
         db.viewPrefs.tableColumnOrder.push(col.id);
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 201, col);
       }
       if (method === 'PUT' && resId) {
@@ -567,14 +763,14 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         db.customColumns[idx] = { ...db.customColumns[idx], ...body, id: resId };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.customColumns[idx]);
       }
       if (method === 'DELETE' && resId) {
         db.customColumns = db.customColumns.filter((c) => c.id !== resId);
         db.viewPrefs.tableColumnOrder = db.viewPrefs.tableColumnOrder.filter((cid) => cid !== resId);
         db.demands.forEach((d) => { if (d.custom_fields) delete d.custom_fields[resId]; });
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
     }
@@ -585,7 +781,7 @@ async function handleAPI(req, res, pathname, query) {
       if (method === 'PUT' && !resId) {
         const body = await readBody(req);
         db.viewPrefs = { ...db.viewPrefs, ...body };
-        saveDB(db);
+        saveDB(root);
         return sendJSON(res, 200, db.viewPrefs);
       }
     }

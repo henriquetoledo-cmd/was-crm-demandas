@@ -217,6 +217,7 @@ function matchTrigger(demand, trigger) {
 function applyAutomations(db, demand) {
   (db.automations || []).forEach((auto) => {
     if (!auto.active) return;
+    if (auto.kind === 'deadline') return; // alertas de prazo sao so informativos, nao alteram campos
     if (matchTrigger(demand, auto.trigger)) {
       demand[auto.action.field] = auto.action.value;
     }
@@ -378,6 +379,7 @@ async function handleAPI(req, res, pathname, query) {
         const auto = {
           id: id(),
           name: body.name || 'Automação',
+          kind: body.kind || 'field',
           active: body.active === undefined ? true : !!body.active,
           trigger: body.trigger || {},
           action: body.action || {},

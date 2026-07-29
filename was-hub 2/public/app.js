@@ -157,6 +157,7 @@ const state = {
   tableClipboard: null,
   dashboardFilters: { clientId: '', responsible: '' },
   currentUser: null,
+  calendarDateFilter: 'both',
 };
 
 // ---------- API helpers ----------
@@ -1154,11 +1155,17 @@ function renderCalendarPage(editor, page) {
   const cells = buildMonthGrid(y, m);
   const today = todayStr();
   const demands = state.demands.filter((d) => d.client_id === state.currentClientId && d.status !== 'arquivado');
+  const dateFilter = state.calendarDateFilter || 'both';
 
   editor.innerHTML = `
     <div class="editor-toolbar">
       <h2 style="margin:0;font-size:17px;font-weight:700">📅 ${escapeHtml(page.title)}</h2>
       <span class="synced-badge">sincronizado com Demandas</span>
+      <select id="cal-date-filter" class="cal-date-filter">
+        <option value="both" ${dateFilter === 'both' ? 'selected' : ''}>🚀🎨 Prazo final + designer</option>
+        <option value="prazo_final" ${dateFilter === 'prazo_final' ? 'selected' : ''}>🚀 Prazo de postagem/entrega</option>
+        <option value="prazo_designer" ${dateFilter === 'prazo_designer' ? 'selected' : ''}>🎨 Prazo do designer</option>
+      </select>
       <div class="cal-nav">
         <button class="icon-btn" id="cal-prev" title="Mês anterior">‹</button>
         <span class="cal-month-label">${MONTH_LABELS[m]} de ${y}</span>
@@ -1166,24 +1173,25 @@ function renderCalendarPage(editor, page) {
         <button class="btn secondary small" id="cal-today">Hoje</button>
       </div>
     </div>
+    <p class="cal-hint">Arraste um card pra outro dia para mudar o prazo — como no Excel/Notion.</p>
     <div class="cal-grid">
       ${WEEKDAY_LABELS.map((w) => `<div class="cal-weekday">${w}</div>`).join('')}
       ${cells.map((cell) => {
         if (!cell.inMonth) return `<div class="cal-cell out-month"><div class="cal-daynum">${cell.day}</div></div>`;
-        const finalItems = demands.filter((d) => d.prazo_final === cell.dateStr);
-        const designerOnly = demands.filter((d) => d.prazo_designer === cell.dateStr && d.prazo_final !== cell.dateStr);
+        const finalItems = dateFilter === 'prazo_designer' ? [] : demands.filter((d) => d.prazo_final === cell.dateStr);
+        const designerOnly = dateFilter === 'prazo_final' ? [] : demands.filter((d) => d.prazo_designer === cell.dateStr && (dateFilter === 'prazo_designer' || d.prazo_final !== cell.dateStr));
         const items = [
-          ...finalItems.map((d) => ({ d, icon: '🚀' })),
-          ...designerOnly.map((d) => ({ d, icon: '🎨' })),
+          ...finalItems.map((d) => ({ d, icon: '🚀', field: 'prazo_final' })),
+          ...designerOnly.map((d) => ({ d, icon: '🎨', field: 'prazo_designer' })),
         ];
         const isToday = cell.dateStr === today;
         return `
-          <div class="cal-cell ${isToday ? 'is-today' : ''}">
+          <div class="cal-cell ${isToday ? 'is-today' : ''}" data-date="${cell.dateStr}">
             <div class="cal-daynum">${cell.day}${isToday ? ' <span class="cal-today-dot">hoje</span>' : ''}</div>
             <div class="cal-items">
-              ${items.map(({ d, icon }) => {
+              ${items.map(({ d, icon, field }) => {
                 const sd = statusDef(d.status);
-                return `<div class="cal-chip tag-${sd.color}" data-open="${d.id}">${icon} ${escapeHtml(d.title)}</div>`;
+                return `<div class="cal-chip tag-${sd.color}" draggable="true" data-open="${d.id}" data-drag-id="${d.id}" data-drag-field="${field}">${icon} ${escapeHtml(d.title)}</div>`;
               }).join('')}
             </div>
           </div>
@@ -1207,8 +1215,40 @@ function renderCalendarPage(editor, page) {
     state.calendarCursor = { y: now.getFullYear(), m: now.getMonth() };
     renderCalendarPage(editor, page);
   };
+  editor.querySelector('#cal-date-filter').onchange = (e) => {
+    state.calendarDateFilter = e.target.value;
+    renderCalendarPage(editor, page);
+  };
   editor.querySelectorAll('.cal-chip').forEach((chip) => {
     chip.onclick = () => openDemandModal(state.demands.find((d) => d.id === chip.dataset.open));
+    chip.addEventListener('dragstart', (e) => {
+      e.stopPropagation();
+      e.dataTransfer.setData('text/plain', JSON.stringify({ id: chip.dataset.dragId, field: chip.dataset.dragField }));
+      e.dataTransfer.effectAllowed = 'move';
+      chip.classList.add('dragging');
+    });
+    chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
+  });
+  editor.querySelectorAll('.cal-cell[data-date]').forEach((cellEl) => {
+    cellEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      cellEl.classList.add('drag-over');
+    });
+    cellEl.addEventListener('dragleave', () => cellEl.classList.remove('drag-over'));
+    cellEl.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      cellEl.classList.remove('drag-over');
+      let payload;
+      try { payload = JSON.parse(e.dataTransfer.getData('text/plain')); } catch (err) { return; }
+      const demand = state.demands.find((d) => d.id === payload.id);
+      const newDate = cellEl.dataset.date;
+      if (!demand || demand[payload.field] === newDate) return;
+      demand[payload.field] = newDate;
+      renderCalendarPage(editor, page);
+      await api('/demands/' + payload.id, { method: 'PUT', body: JSON.stringify({ [payload.field]: newDate }) });
+      toast('Prazo atualizado.', 'success');
+    });
   });
 }
 

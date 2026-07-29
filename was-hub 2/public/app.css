@@ -350,6 +350,59 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .hidden { display: none !important; }
 
+/* ---- Card de demanda: minimalista, estilo Canva ---- */
+.dm-head { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+.dm-title-input {
+  flex: 1;
+  font-size: 20px;
+  font-weight: 700;
+  background: transparent;
+  border: none;
+  padding: 4px 2px;
+  border-bottom: 1px solid transparent;
+}
+.dm-title-input:focus { border-bottom-color: var(--border); outline: none; }
+.dm-title-input::placeholder { color: var(--text-faint); }
+.field-section {
+  padding: 14px 0;
+  border-top: 1px solid var(--border-soft);
+}
+.field-section:first-of-type { border-top: none; padding-top: 0; }
+.field-multi-btn {
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.field-multi-btn:hover { border-color: var(--blue); }
+.field-details {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.field-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  list-style: none;
+}
+.field-details summary::-webkit-details-marker { display: none; }
+.field-details summary::before { content: '▸ '; }
+.field-details[open] summary::before { content: '▾ '; }
+.field-details[open] summary { margin-bottom: 4px; }
+
 .strategy-doc {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 18px; margin-bottom: 14px;
@@ -1086,6 +1139,30 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .capture-toggle { display: flex; align-items: center; gap: 2px; cursor: pointer; font-size: 11px; }
 .capture-toggle input { width: auto; margin: 0; }
 .cell-capture-date { width: 120px; }
+
+/* ---- Tabela estilo Excel: seleção de células, colunas reordenáveis/customizadas ---- */
+.table-hint { color: var(--text-dim); font-size: 11px; margin: 0 0 8px; }
+td[data-row][data-col] { position: relative; user-select: none; }
+td[data-row][data-col].cell-selected {
+  background: rgba(59,130,246,.14) !important;
+  outline: 2px solid var(--blue);
+  outline-offset: -1px;
+  z-index: 1;
+}
+.th-draggable { cursor: grab; display: table-cell; position: relative; }
+.th-draggable:active { cursor: grabbing; }
+.th-draggable.th-drag-over { background: rgba(59,130,246,.18); }
+.th-label { pointer-events: none; }
+.th-del {
+  margin-left: 6px; color: var(--text-faint); cursor: pointer; font-weight: 700; padding: 0 3px; border-radius: 4px;
+}
+.th-del:hover { color: var(--red); background: rgba(239,68,68,.12); }
+.th-add { width: 34px; text-align: center; }
+.th-add-btn {
+  width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2);
+  color: var(--text-dim); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.th-add-btn:hover { border-color: var(--blue); color: var(--blue); }
 
 .inline-popover {
   position: fixed;

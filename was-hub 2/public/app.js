@@ -148,6 +148,12 @@ const state = {
   calendarCursor: null,
   automacoesTab: 'regras',
   focusTitleForPageId: null,
+  focusTitleForDemandId: null,
+  lastUsedClientId: null,
+  customColumns: [],
+  tableColumnOrder: [],
+  tableSelection: null,
+  tableClipboard: null,
 };
 
 // ---------- API helpers ----------
@@ -164,16 +170,20 @@ async function api(path, opts) {
 }
 
 async function loadAll() {
-  const [clients, demands, team, automations] = await Promise.all([
+  const [clients, demands, team, automations, customColumns, viewPrefs] = await Promise.all([
     api('/clients'),
     api('/demands'),
     api('/team'),
     api('/automations'),
+    api('/custom-columns'),
+    api('/view-prefs'),
   ]);
   state.clients = clients;
   state.demands = demands;
   state.team = team;
   state.automations = automations;
+  state.customColumns = customColumns;
+  state.tableColumnOrder = normalizeColumnOrder(viewPrefs.tableColumnOrder, customColumns);
 }
 
 function clientById(id) {
@@ -1429,7 +1439,207 @@ function renderDemandCard(d) {
   `;
 }
 
-// ---------- Tabela: edição inline (sem abrir o card) + edição em massa ----------
+// ---------- Colunas da tabela: builtin + customizadas, reordenáveis ----------
+const BUILTIN_COLUMN_IDS = ['title', 'client', 'status', 'format', 'platform', 'responsible', 'priority', 'prazo_designer', 'prazo_final', 'captacao'];
+const BUILTIN_COLUMN_LABELS = {
+  title: 'Demanda', client: 'Cliente', status: 'Status', format: 'Formato', platform: 'Plataforma',
+  responsible: 'Responsável', priority: 'Prioridade', prazo_designer: 'Prazo designer', prazo_final: 'Prazo final', captacao: 'Captação',
+};
+
+function normalizeColumnOrder(saved, customColumns) {
+  const customIds = (customColumns || []).map((c) => c.id);
+  const all = [...BUILTIN_COLUMN_IDS, ...customIds];
+  const cleaned = (saved || []).filter((cid) => all.includes(cid));
+  all.forEach((cid) => { if (!cleaned.includes(cid)) cleaned.push(cid); });
+  return cleaned;
+}
+
+function columnLabel(colId) {
+  if (BUILTIN_COLUMN_LABELS[colId]) return BUILTIN_COLUMN_LABELS[colId];
+  const custom = state.customColumns.find((c) => c.id === colId);
+  return custom ? custom.name : colId;
+}
+
+function saveColumnOrder() {
+  api('/view-prefs', { method: 'PUT', body: JSON.stringify({ tableColumnOrder: state.tableColumnOrder }) });
+}
+
+// valor "puro" de uma célula (usado por copiar/colar) — arrays voltam como cópia
+function getCellValue(colId, d) {
+  if (colId === 'title') return d.title || '';
+  if (colId === 'client') return d.client_id || '';
+  if (colId === 'status') return d.status || '';
+  if (colId === 'format' || colId === 'platform') return (d[colId] || []).slice();
+  if (colId === 'responsible') return d.responsible || '';
+  if (colId === 'priority') return d.priority || '';
+  if (colId === 'prazo_designer') return d.prazo_designer || '';
+  if (colId === 'prazo_final') return d.prazo_final || '';
+  if (colId === 'captacao') return null; // campo composto, fora da seleção estilo Excel
+  return (d.custom_fields && d.custom_fields[colId]) || '';
+}
+
+function buildCellPayload(colId, value) {
+  if (colId === 'title') return { title: (value || '').toString().trim() || 'Sem título' };
+  if (colId === 'client') return { client_id: value };
+  if (colId === 'status') return { status: value };
+  if (colId === 'format' || colId === 'platform') return { [colId]: Array.isArray(value) ? value.slice() : [] };
+  if (colId === 'responsible') return { responsible: value };
+  if (colId === 'priority') return { priority: value };
+  if (colId === 'prazo_designer') return { prazo_designer: value };
+  if (colId === 'prazo_final') return { prazo_final: value };
+  return { custom_fields: { [colId]: value } };
+}
+
+// null = coluna não é "limpável" (campos obrigatórios como cliente/status/prioridade)
+function clearCellPayload(colId) {
+  if (colId === 'client' || colId === 'status' || colId === 'priority' || colId === 'captacao') return null;
+  if (colId === 'format' || colId === 'platform') return buildCellPayload(colId, []);
+  if (colId === 'title') return { title: 'Sem título' };
+  return buildCellPayload(colId, '');
+}
+
+function mergePayload(existing, incoming) {
+  const merged = { ...existing, ...incoming };
+  if (existing.custom_fields || incoming.custom_fields) {
+    merged.custom_fields = { ...(existing.custom_fields || {}), ...(incoming.custom_fields || {}) };
+  }
+  return merged;
+}
+
+async function applyBatchChanges(changes, verb) {
+  const ids = Object.keys(changes);
+  if (!ids.length) return;
+  await Promise.all(ids.map((rid) => api('/demands/' + rid, { method: 'PUT', body: JSON.stringify(changes[rid]) }).then((updated) => {
+    const idx = state.demands.findIndex((d) => d.id === rid);
+    if (idx > -1) state.demands[idx] = updated;
+  })));
+  updateNavBadges();
+  renderDemandas(document.getElementById('main'));
+  toast(`${ids.length} célula(s) ${verb}.`, 'success');
+}
+
+function inSelectionRange(sel, r, c) {
+  if (!sel) return false;
+  const r1 = Math.min(sel.r1, sel.r2), r2 = Math.max(sel.r1, sel.r2);
+  const c1 = Math.min(sel.c1, sel.c2), c2 = Math.max(sel.c1, sel.c2);
+  return r >= r1 && r <= r2 && c >= c1 && c <= c2;
+}
+
+function applySelectionHighlight(root) {
+  if (!root) return;
+  root.querySelectorAll('td[data-row][data-col]').forEach((td) => {
+    const r = Number(td.dataset.row);
+    const c = state.tableColumnOrder.indexOf(td.dataset.col);
+    td.classList.toggle('cell-selected', inSelectionRange(state.tableSelection, r, c));
+  });
+}
+
+// Listener único (fica sempre ativo, mas só age quando a tabela de Demandas está na tela).
+function handleTableKeydown(e) {
+  if (state.page !== 'demandas' || state.demandsView !== 'table') return;
+  const active = document.activeElement;
+  if (active && ['INPUT', 'SELECT', 'TEXTAREA'].includes(active.tagName)) return;
+  const sel = state.tableSelection;
+  if (!sel) return;
+  const rowIds = state.tableRowIds || [];
+  const cols = state.tableColumnOrder;
+  const maxR = rowIds.length - 1;
+  const maxC = cols.length - 1;
+  const meta = e.ctrlKey || e.metaKey;
+
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+    e.preventDefault();
+    let { r2, c2 } = sel;
+    if (e.key === 'ArrowUp') r2 = Math.max(0, r2 - 1);
+    if (e.key === 'ArrowDown') r2 = Math.min(maxR, r2 + 1);
+    if (e.key === 'ArrowLeft') c2 = Math.max(0, c2 - 1);
+    if (e.key === 'ArrowRight') c2 = Math.min(maxC, c2 + 1);
+    state.tableSelection = e.shiftKey ? { r1: sel.r1, c1: sel.c1, r2, c2 } : { r1: r2, c1: c2, r2, c2 };
+    applySelectionHighlight(document.getElementById('demands-view'));
+    return;
+  }
+
+  if (meta && e.key.toLowerCase() === 'c') {
+    e.preventDefault();
+    const d = state.demands.find((x) => x.id === rowIds[sel.r1]);
+    if (!d) return;
+    const colId = cols[sel.c1];
+    const value = getCellValue(colId, d);
+    if (value === null) return;
+    state.tableClipboard = { colId, value };
+    toast('Célula copiada.', 'info');
+    return;
+  }
+
+  if (meta && e.key.toLowerCase() === 'v') {
+    e.preventDefault();
+    const clip = state.tableClipboard;
+    if (!clip) return;
+    const r1 = Math.min(sel.r1, sel.r2), r2 = Math.max(sel.r1, sel.r2);
+    const c1 = Math.min(sel.c1, sel.c2), c2 = Math.max(sel.c1, sel.c2);
+    const changes = {};
+    for (let r = r1; r <= r2; r++) {
+      for (let c = c1; c <= c2; c++) {
+        const colId = cols[c];
+        if (colId !== clip.colId) continue; // colar só dentro da mesma coluna copiada
+        const rid = rowIds[r];
+        if (!rid) continue;
+        changes[rid] = mergePayload(changes[rid] || {}, buildCellPayload(colId, clip.value));
+      }
+    }
+    applyBatchChanges(changes, 'colada(s)');
+    return;
+  }
+
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    const r1 = Math.min(sel.r1, sel.r2), r2 = Math.max(sel.r1, sel.r2);
+    const c1 = Math.min(sel.c1, sel.c2), c2 = Math.max(sel.c1, sel.c2);
+    const changes = {};
+    for (let r = r1; r <= r2; r++) {
+      for (let c = c1; c <= c2; c++) {
+        const colId = cols[c];
+        const payload = clearCellPayload(colId);
+        if (!payload) continue;
+        const rid = rowIds[r];
+        if (!rid) continue;
+        changes[rid] = mergePayload(changes[rid] || {}, payload);
+      }
+    }
+    applyBatchChanges(changes, 'limpa(s)');
+    return;
+  }
+}
+document.addEventListener('keydown', handleTableKeydown);
+
+function openAddColumnPopover(anchorEl) {
+  const root = document.getElementById('ctx-menu-root');
+  const rect = anchorEl.getBoundingClientRect();
+  const left = Math.min(rect.left, window.innerWidth - 220);
+  root.innerHTML = `
+    <div class="inline-popover" style="left:${left}px; top:${rect.bottom + 4}px">
+      <input type="text" id="new-col-name" placeholder="Nome da coluna" style="width:100%;margin-bottom:8px" />
+      <button class="btn small" id="new-col-create" style="width:100%">Criar coluna</button>
+    </div>
+  `;
+  const input = document.getElementById('new-col-name');
+  setTimeout(() => input.focus(), 0);
+  async function create() {
+    const name = input.value.trim();
+    if (!name) { toast('Dê um nome pra coluna.', 'warn'); return; }
+    const col = await api('/custom-columns', { method: 'POST', body: JSON.stringify({ name }) });
+    state.customColumns.push(col);
+    state.tableColumnOrder.push(col.id);
+    root.innerHTML = '';
+    renderDemandas(document.getElementById('main'));
+    toast('Coluna criada.', 'success');
+  }
+  document.getElementById('new-col-create').onclick = create;
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); create(); } e.stopPropagation(); });
+  setTimeout(() => document.addEventListener('click', (e) => { if (!root.contains(e.target)) root.innerHTML = ''; }, { once: true }), 0);
+}
+
+// ---------- Tabela: edição inline (sem abrir o card) + edição em massa estilo Excel ----------
 async function patchInline(demand, payload, opts) {
   await api('/demands/' + demand.id, { method: 'PUT', body: JSON.stringify(payload) });
   Object.assign(demand, payload);
@@ -1439,6 +1649,16 @@ async function patchInline(demand, payload, opts) {
   if (!opts || opts.rerender !== false) renderDemandas(document.getElementById('main'));
 }
 const patchInlineDebounced = debounce((demand, payload) => patchInline(demand, payload, { rerender: false }), 500);
+
+const patchCustomFieldDebounced = debounce((demandId, colId, value) => {
+  api('/demands/' + demandId, { method: 'PUT', body: JSON.stringify({ custom_fields: { [colId]: value } }) });
+}, 500);
+function patchCustomField(demand, colId, value) {
+  demand.custom_fields = { ...(demand.custom_fields || {}), [colId]: value };
+  const idx = state.demands.findIndex((d) => d.id === demand.id);
+  if (idx > -1) state.demands[idx].custom_fields = demand.custom_fields;
+  patchCustomFieldDebounced(demand.id, colId, value);
+}
 
 function openInlineMultiPopover(anchorEl, options, selectedValues, onChange) {
   const root = document.getElementById('ctx-menu-root');
@@ -1467,65 +1687,85 @@ function openInlineMultiPopover(anchorEl, options, selectedValues, onChange) {
   setTimeout(() => document.addEventListener('click', () => { root.innerHTML = ''; }, { once: true }), 0);
 }
 
+function renderTableCell(colId, d, rowIndex, teamNames) {
+  const attrs = `data-row="${rowIndex}" data-col="${colId}"`;
+  if (colId === 'title') {
+    return `<td class="td-title" ${attrs}><input type="text" class="cell-input cell-title" data-id="${d.id}" value="${escapeHtml(d.title)}" /></td>`;
+  }
+  if (colId === 'client') {
+    return `<td ${attrs}><select class="cell-select" data-id="${d.id}" data-field="client_id">${state.clients.map((c) => `<option value="${c.id}" ${d.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select></td>`;
+  }
+  if (colId === 'status') {
+    return `<td ${attrs}><select class="cell-select tag-${statusDef(d.status).color}" data-id="${d.id}" data-field="status">${STAGES.map((stage) => `<optgroup label="${stage.label}">${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${d.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}</optgroup>`).join('')}</select></td>`;
+  }
+  if (colId === 'format' || colId === 'platform') {
+    return `<td ${attrs}><button class="cell-multi-btn" data-id="${d.id}" data-field="${colId}">${(d[colId] || []).join(', ') || '+ adicionar'}</button></td>`;
+  }
+  if (colId === 'responsible') {
+    const respOptions = d.responsible && !teamNames.includes(d.responsible) ? [...teamNames, d.responsible] : teamNames;
+    return `<td ${attrs}><select class="cell-select" data-id="${d.id}" data-field="responsible"><option value="">—</option>${respOptions.map((n) => `<option value="${escapeHtml(n)}" ${d.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select></td>`;
+  }
+  if (colId === 'priority') {
+    return `<td ${attrs}><select class="cell-select" data-id="${d.id}" data-field="priority">${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${d.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}</select></td>`;
+  }
+  if (colId === 'prazo_designer') {
+    return `<td ${attrs}><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_designer" value="${d.prazo_designer || ''}" /></td>`;
+  }
+  if (colId === 'prazo_final') {
+    const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
+    return `<td class="${overdue ? 'overdue-cell' : ''}" ${attrs}><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_final" value="${d.prazo_final || ''}" /></td>`;
+  }
+  if (colId === 'captacao') {
+    return `<td class="cell-capture">
+      <label class="capture-toggle"><input type="checkbox" class="cell-capture-toggle" data-id="${d.id}" ${d.needs_capture !== false ? 'checked' : ''} /> 🎬</label>
+      ${d.needs_capture !== false ? `<input type="date" class="cell-input cell-capture-date" data-id="${d.id}" value="${d.capture_date || ''}" />` : ''}
+    </td>`;
+  }
+  const val = (d.custom_fields && d.custom_fields[colId]) || '';
+  return `<td ${attrs}><input type="text" class="cell-input cell-custom" data-id="${d.id}" data-customcol="${colId}" value="${escapeHtml(val)}" /></td>`;
+}
+
 function renderDemandTable(root, filtered) {
   const sorted = [...filtered].sort((a, b) => (a.prazo_final || '9999').localeCompare(b.prazo_final || '9999'));
   const teamNames = activeTeamNames();
+  state.tableRowIds = sorted.map((d) => d.id);
+  const totalCols = state.tableColumnOrder.length + 3; // checkbox + colunas + spacer da coluna "+" + expandir
+
+  const headerCells = state.tableColumnOrder.map((colId) => `
+    <th draggable="true" data-col="${colId}" class="th-draggable">
+      <span class="th-label">${escapeHtml(columnLabel(colId))}</span>
+      ${state.customColumns.some((c) => c.id === colId) ? `<span class="th-del" data-delcol="${colId}" title="Excluir coluna">×</span>` : ''}
+    </th>
+  `).join('');
 
   root.innerHTML = `
     <div id="bulk-bar-slot"></div>
+    <p class="table-hint">Arraste pra selecionar células · Ctrl+C / Ctrl+V pra colar em massa · Delete pra limpar — como no Excel.</p>
     <div class="table-wrap">
       <table class="data-table editable">
         <thead>
           <tr>
             <th style="width:30px"><input type="checkbox" id="check-all" /></th>
-            <th>Demanda</th><th>Cliente</th><th>Status</th><th>Formato</th><th>Plataforma</th>
-            <th>Responsável</th><th>Prioridade</th><th>Prazo designer</th><th>Prazo final</th><th>Captação</th><th></th>
+            ${headerCells}
+            <th class="th-add"><button class="th-add-btn" id="btn-add-column" title="Nova coluna">+</button></th>
+            <th style="width:30px"></th>
           </tr>
         </thead>
         <tbody>
-          ${sorted.length ? sorted.map((d) => {
-            const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
-            const respOptions = d.responsible && !teamNames.includes(d.responsible) ? [...teamNames, d.responsible] : teamNames;
+          ${sorted.length ? sorted.map((d, rowIndex) => {
+            const cellsHtml = state.tableColumnOrder.map((colId) => renderTableCell(colId, d, rowIndex, teamNames)).join('');
             return `
               <tr data-id="${d.id}">
                 <td><input type="checkbox" class="row-check" data-id="${d.id}" ${state.selectedDemandIds.has(d.id) ? 'checked' : ''} /></td>
-                <td class="td-title"><input type="text" class="cell-input cell-title" data-id="${d.id}" value="${escapeHtml(d.title)}" /></td>
-                <td>
-                  <select class="cell-select" data-id="${d.id}" data-field="client_id">
-                    ${state.clients.map((c) => `<option value="${c.id}" ${d.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
-                  </select>
-                </td>
-                <td>
-                  <select class="cell-select tag-${statusDef(d.status).color}" data-id="${d.id}" data-field="status">
-                    ${STAGES.map((stage) => `<optgroup label="${stage.label}">${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${d.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}</optgroup>`).join('')}
-                  </select>
-                </td>
-                <td><button class="cell-multi-btn" data-id="${d.id}" data-field="format">${(d.format || []).join(', ') || '+ adicionar'}</button></td>
-                <td><button class="cell-multi-btn" data-id="${d.id}" data-field="platform">${(d.platform || []).join(', ') || '+ adicionar'}</button></td>
-                <td>
-                  <select class="cell-select" data-id="${d.id}" data-field="responsible">
-                    <option value="">—</option>
-                    ${respOptions.map((n) => `<option value="${escapeHtml(n)}" ${d.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
-                  </select>
-                </td>
-                <td>
-                  <select class="cell-select" data-id="${d.id}" data-field="priority">
-                    ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${d.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
-                  </select>
-                </td>
-                <td><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_designer" value="${d.prazo_designer || ''}" /></td>
-                <td class="${overdue ? 'overdue-cell' : ''}"><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_final" value="${d.prazo_final || ''}" /></td>
-                <td class="cell-capture">
-                  <label class="capture-toggle"><input type="checkbox" class="cell-capture-toggle" data-id="${d.id}" ${d.needs_capture !== false ? 'checked' : ''} /> 🎬</label>
-                  ${d.needs_capture !== false ? `<input type="date" class="cell-input cell-capture-date" data-id="${d.id}" value="${d.capture_date || ''}" />` : ''}
-                </td>
+                ${cellsHtml}
+                <td></td>
                 <td><button class="icon-btn" data-expand="${d.id}" title="Abrir card completo">⤢</button></td>
               </tr>
             `;
-          }).join('') : `<tr><td colspan="12"><div class="empty-state">Nenhuma demanda encontrada com esses filtros.</div></td></tr>`}
+          }).join('') : `<tr><td colspan="${totalCols}"><div class="empty-state">Nenhuma demanda encontrada com esses filtros.</div></td></tr>`}
         </tbody>
         <tfoot>
-          <tr class="table-count-row"><td colspan="12">${sorted.length} demanda${sorted.length === 1 ? '' : 's'} no total</td></tr>
+          <tr class="table-count-row"><td colspan="${totalCols}">${sorted.length} demanda${sorted.length === 1 ? '' : 's'} no total</td></tr>
         </tfoot>
       </table>
     </div>
@@ -1575,7 +1815,6 @@ function renderDemandTable(root, filtered) {
   }
 
   root.querySelectorAll('.cell-title').forEach((input) => {
-    input.onclick = (e) => e.stopPropagation();
     input.addEventListener('input', () => {
       const demand = state.demands.find((d) => d.id === input.dataset.id);
       patchInlineDebounced(demand, { title: input.value.trim() || 'Sem título' });
@@ -1583,7 +1822,6 @@ function renderDemandTable(root, filtered) {
   });
 
   root.querySelectorAll('.cell-select').forEach((sel) => {
-    sel.onclick = (e) => e.stopPropagation();
     sel.onchange = () => {
       const demand = state.demands.find((d) => d.id === sel.dataset.id);
       patchInline(demand, { [sel.dataset.field]: sel.value });
@@ -1591,11 +1829,17 @@ function renderDemandTable(root, filtered) {
   });
 
   root.querySelectorAll('input[type=date].cell-input').forEach((inp) => {
-    inp.onclick = (e) => e.stopPropagation();
     inp.onchange = () => {
       const demand = state.demands.find((d) => d.id === inp.dataset.id);
       patchInline(demand, { [inp.dataset.field]: inp.value });
     };
+  });
+
+  root.querySelectorAll('.cell-custom').forEach((input) => {
+    input.addEventListener('input', () => {
+      const demand = state.demands.find((d) => d.id === input.dataset.id);
+      patchCustomField(demand, input.dataset.customcol, input.value);
+    });
   });
 
   root.querySelectorAll('.cell-capture-toggle').forEach((cb) => {
@@ -1631,8 +1875,78 @@ function renderDemandTable(root, filtered) {
       openDemandModal(state.demands.find((d) => d.id === btn.dataset.expand));
     };
   });
-}
 
+  // ---- Seleção de células estilo Excel (arrastar, setas, copiar/colar/limpar) ----
+  let dragging = false;
+  function onMove(e) {
+    if (!dragging) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const td = el && el.closest('td[data-row][data-col]');
+    if (!td || !state.tableSelection) return;
+    state.tableSelection.r2 = Number(td.dataset.row);
+    state.tableSelection.c2 = state.tableColumnOrder.indexOf(td.dataset.col);
+    applySelectionHighlight(root);
+  }
+  function onUp() {
+    dragging = false;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+  root.querySelectorAll('td[data-row][data-col]').forEach((td) => {
+    td.addEventListener('mousedown', () => {
+      const r = Number(td.dataset.row);
+      const c = state.tableColumnOrder.indexOf(td.dataset.col);
+      dragging = true;
+      state.tableSelection = { r1: r, c1: c, r2: r, c2: c };
+      applySelectionHighlight(root);
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+  applySelectionHighlight(root);
+
+  // ---- Reordenar colunas (arrastar cabeçalho) ----
+  let dragColId = null;
+  root.querySelectorAll('th.th-draggable').forEach((th) => {
+    th.addEventListener('dragstart', (e) => {
+      if (e.target.closest('.th-del')) { e.preventDefault(); return; }
+      dragColId = th.dataset.col;
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    th.addEventListener('dragover', (e) => { e.preventDefault(); th.classList.add('th-drag-over'); });
+    th.addEventListener('dragleave', () => th.classList.remove('th-drag-over'));
+    th.addEventListener('drop', (e) => {
+      e.preventDefault();
+      th.classList.remove('th-drag-over');
+      const targetColId = th.dataset.col;
+      if (!dragColId || dragColId === targetColId) return;
+      const order = state.tableColumnOrder.slice();
+      const fromIdx = order.indexOf(dragColId);
+      const toIdx = order.indexOf(targetColId);
+      order.splice(fromIdx, 1);
+      order.splice(toIdx, 0, dragColId);
+      state.tableColumnOrder = order;
+      saveColumnOrder();
+      renderDemandas(document.getElementById('main'));
+    });
+  });
+
+  root.querySelectorAll('[data-delcol]').forEach((el) => {
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      const colId = el.dataset.delcol;
+      const ok = await confirmDialog('Excluir esta coluna? Os valores preenchidos nela serão perdidos.');
+      if (!ok) return;
+      await api('/custom-columns/' + colId, { method: 'DELETE' });
+      state.customColumns = state.customColumns.filter((c) => c.id !== colId);
+      state.tableColumnOrder = state.tableColumnOrder.filter((cid) => cid !== colId);
+      renderDemandas(document.getElementById('main'));
+      toast('Coluna excluída.', 'success');
+    };
+  });
+
+  document.getElementById('btn-add-column').onclick = (e) => openAddColumnPopover(e.currentTarget);
+}
 function renderBulkBar(slot) {
   const n = state.selectedDemandIds.size;
   if (!n) { slot.innerHTML = ''; return; }
@@ -1677,109 +1991,123 @@ function renderBulkBar(slot) {
 }
 
 // Modal de demanda: criação rápida (mínima) -> depois autosave campo a campo, sem botão "Salvar".
+function multiBtnLabel(values, placeholder) {
+  return values && values.length ? escapeHtml(values.join(', ')) : placeholder;
+}
+
 function openDemandModal(demand, defaultStatus) {
-  if (!demand) return openQuickCreateDemand(defaultStatus);
+  if (!demand) return quickCreateDemandInstant(defaultStatus);
 
   const teamOptions = activeTeamNames();
   if (demand.responsible && !teamOptions.includes(demand.responsible)) teamOptions.push(demand.responsible);
+  const hasNotes = !!(demand.briefing || demand.description);
 
   showModal(`
-    <h2>${escapeHtml(demand.title) || 'Demanda'}</h2>
-    <div class="autosave-line">Alterações são salvas automaticamente <span id="autosave-indicator" class="autosave-indicator"></span></div>
-
-    <label>Projeto / Cliente</label>
-    <select id="f-client" style="width:100%">
-      ${state.clients.map((c) => `<option value="${c.id}" ${demand.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
-    </select>
-    <label>Demanda</label>
-    <input type="text" id="f-title" value="${escapeHtml(demand.title)}" style="width:100%" />
-
-    <label>Briefing (Social Media)</label>
-    <textarea id="f-briefing" placeholder="Objetivo, referências, direcionamento para quem for executar..." style="min-height:80px">${escapeHtml(demand.briefing)}</textarea>
-
-    <label>Descrição / notas gerais</label>
-    <textarea id="f-desc" style="min-height:50px">${escapeHtml(demand.description)}</textarea>
-
-    <label>Formato</label>
-    <div class="checkbox-grid" id="f-format">
-      ${FORMATO_OPTIONS.map((o) => `
-        <label class="chip"><input type="checkbox" value="${escapeHtml(o.name)}" ${demand.format.includes(o.name) ? 'checked' : ''}/>${escapeHtml(o.name)}</label>
-      `).join('')}
+    <div class="dm-head">
+      <input type="text" id="f-title" class="dm-title-input" placeholder="Sem título" value="${escapeHtml(demand.title)}" />
+      <span id="autosave-indicator" class="autosave-indicator"></span>
     </div>
 
-    <label>Plataforma</label>
-    <div class="checkbox-grid" id="f-platform">
-      ${PLATAFORMA_OPTIONS.map((o) => `
-        <label class="chip"><input type="checkbox" value="${escapeHtml(o.name)}" ${demand.platform.includes(o.name) ? 'checked' : ''}/>${escapeHtml(o.name)}</label>
-      `).join('')}
-    </div>
-
-    <label>Status (etapa do fluxo WAS)</label>
-    <select id="f-status" style="width:100%">
-      ${STAGES.map((stage) => `
-        <optgroup label="${stage.label}">
-          ${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${demand.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}
-        </optgroup>
-      `).join('')}
-    </select>
-
-    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
-      <input type="checkbox" id="f-needs-capture" ${demand.needs_capture !== false ? 'checked' : ''} style="width:auto" />
-      Precisa de captação
-    </label>
-    <div id="capture-date-wrap" style="${demand.needs_capture === false ? 'display:none' : ''}">
-      <label>Dia da captação</label>
-      <input type="date" id="f-capture-date" value="${demand.capture_date || ''}" />
-    </div>
-
-    <div class="two-col">
-      <div>
-        <label>Prazo designer</label>
-        <input type="date" id="f-prazo-designer" value="${demand.prazo_designer || ''}" />
-      </div>
-      <div>
-        <label>Postagem / entrega final</label>
-        <input type="date" id="f-prazo-final" value="${demand.prazo_final || ''}" />
+    <div class="field-section">
+      <div class="two-col">
+        <div>
+          <label>Cliente</label>
+          <select id="f-client" style="width:100%">
+            ${state.clients.map((c) => `<option value="${c.id}" ${demand.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label>Status</label>
+          <select id="f-status" style="width:100%">
+            ${STAGES.map((stage) => `
+              <optgroup label="${stage.label}">
+                ${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${demand.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}
+              </optgroup>
+            `).join('')}
+          </select>
+        </div>
       </div>
     </div>
 
-    <div class="two-col">
-      <div>
-        <label>Prioridade</label>
-        <select id="f-priority">
-          ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${demand.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
-        </select>
+    <div class="field-section">
+      <div class="two-col">
+        <div>
+          <label>Formato</label>
+          <button type="button" class="field-multi-btn" id="f-format-btn">${multiBtnLabel(demand.format, '+ escolher formato')}</button>
+        </div>
+        <div>
+          <label>Plataforma</label>
+          <button type="button" class="field-multi-btn" id="f-platform-btn">${multiBtnLabel(demand.platform, '+ escolher plataforma')}</button>
+        </div>
       </div>
-      <div>
-        <label>Previsão</label>
-        <select id="f-forecast">
-          ${FORECAST_OPTIONS.map((p) => `<option value="${p.key}" ${demand.forecast === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
-        </select>
-      </div>
-    </div>
-
-    <div class="two-col">
-      <div>
-        <label>Responsável</label>
-        <select id="f-resp">
-          <option value="">— Sem responsável —</option>
-          ${teamOptions.map((n) => `<option value="${escapeHtml(n)}" ${demand.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
-        </select>
-      </div>
-      <div>
-        <label>Refações</label>
-        <select id="f-refacao">
-          ${REFACAO_OPTIONS.map((r) => `<option value="${r.key}" ${demand.refacao === r.key ? 'selected' : ''}>${r.label}</option>`).join('')}
-        </select>
+      <div class="two-col" style="margin-top:12px">
+        <div>
+          <label>Prioridade</label>
+          <select id="f-priority">
+            ${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${demand.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label>Previsão</label>
+          <select id="f-forecast">
+            ${FORECAST_OPTIONS.map((p) => `<option value="${p.key}" ${demand.forecast === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+          </select>
+        </div>
       </div>
     </div>
 
-    <label>Link (arquivo, drive, etc.)</label>
-    <input type="text" id="f-link" value="${escapeHtml(demand.link)}" style="width:100%" />
-    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
-      <input type="checkbox" id="f-visible" ${demand.visible_to_client ? 'checked' : ''} style="width:auto" />
-      Visível no portal do cliente
-    </label>
+    <div class="field-section">
+      <label style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="f-needs-capture" ${demand.needs_capture !== false ? 'checked' : ''} style="width:auto" />
+        Precisa de captação
+      </label>
+      <div id="capture-date-wrap" style="${demand.needs_capture === false ? 'display:none' : ''};margin-top:8px">
+        <input type="date" id="f-capture-date" value="${demand.capture_date || ''}" />
+      </div>
+      <div class="two-col" style="margin-top:12px">
+        <div>
+          <label>Prazo designer</label>
+          <input type="date" id="f-prazo-designer" value="${demand.prazo_designer || ''}" />
+        </div>
+        <div>
+          <label>Entrega final</label>
+          <input type="date" id="f-prazo-final" value="${demand.prazo_final || ''}" />
+        </div>
+      </div>
+    </div>
+
+    <div class="field-section">
+      <div class="two-col">
+        <div>
+          <label>Responsável</label>
+          <select id="f-resp">
+            <option value="">— Sem responsável —</option>
+            ${teamOptions.map((n) => `<option value="${escapeHtml(n)}" ${demand.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label>Refações</label>
+          <select id="f-refacao">
+            ${REFACAO_OPTIONS.map((r) => `<option value="${r.key}" ${demand.refacao === r.key ? 'selected' : ''}>${r.label}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <details class="field-details" ${hasNotes ? 'open' : ''}>
+      <summary>Briefing e notas</summary>
+      <label style="margin-top:10px">Briefing (Social Media)</label>
+      <textarea id="f-briefing" placeholder="Objetivo, referências, direcionamento para quem for executar..." style="min-height:70px">${escapeHtml(demand.briefing)}</textarea>
+      <label>Notas gerais</label>
+      <textarea id="f-desc" style="min-height:44px">${escapeHtml(demand.description)}</textarea>
+      <label>Link (arquivo, drive, etc.)</label>
+      <input type="text" id="f-link" value="${escapeHtml(demand.link)}" style="width:100%" />
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
+        <input type="checkbox" id="f-visible" ${demand.visible_to_client ? 'checked' : ''} style="width:auto" />
+        Visível no portal do cliente
+      </label>
+    </details>
+
     <div class="modal-footer">
       <button class="btn danger" id="btn-delete" style="margin-right:auto">Excluir</button>
       <button class="btn" id="btn-close">Fechar</button>
@@ -1804,7 +2132,7 @@ function openDemandModal(demand, defaultStatus) {
   }
   const patchDebounced = debounce(patch, 500);
 
-  document.getElementById('f-client').onchange = (e) => patch({ client_id: e.target.value });
+  document.getElementById('f-client').onchange = (e) => { state.lastUsedClientId = e.target.value; patch({ client_id: e.target.value }); };
   document.getElementById('f-title').addEventListener('input', (e) => patchDebounced({ title: e.target.value.trim() }));
   document.getElementById('f-briefing').addEventListener('input', (e) => patchDebounced({ briefing: e.target.value }));
   document.getElementById('f-desc').addEventListener('input', (e) => patchDebounced({ description: e.target.value }));
@@ -1823,12 +2151,20 @@ function openDemandModal(demand, defaultStatus) {
   };
   document.getElementById('f-capture-date').onchange = (e) => patch({ capture_date: e.target.value });
 
-  document.querySelectorAll('#f-format input').forEach((cb) => {
-    cb.onchange = () => patch({ format: Array.from(document.querySelectorAll('#f-format input:checked')).map((i) => i.value) });
-  });
-  document.querySelectorAll('#f-platform input').forEach((cb) => {
-    cb.onchange = () => patch({ platform: Array.from(document.querySelectorAll('#f-platform input:checked')).map((i) => i.value) });
-  });
+  document.getElementById('f-format-btn').onclick = (e) => {
+    openInlineMultiPopover(e.currentTarget, FORMATO_OPTIONS.map((o) => o.name), demand.format, (next) => {
+      demand.format = next;
+      e.currentTarget.textContent = multiBtnLabel(next, '+ escolher formato');
+      patch({ format: next });
+    });
+  };
+  document.getElementById('f-platform-btn').onclick = (e) => {
+    openInlineMultiPopover(e.currentTarget, PLATAFORMA_OPTIONS.map((o) => o.name), demand.platform, (next) => {
+      demand.platform = next;
+      e.currentTarget.textContent = multiBtnLabel(next, '+ escolher plataforma');
+      patch({ platform: next });
+    });
+  };
 
   document.getElementById('btn-close').onclick = closeModal;
   document.getElementById('btn-delete').onclick = async () => {
@@ -1840,43 +2176,34 @@ function openDemandModal(demand, defaultStatus) {
     render();
     toast('Demanda excluída.', 'success');
   };
+
+  const titleInput = document.getElementById('f-title');
+  if (state.focusTitleForDemandId === demand.id) {
+    state.focusTitleForDemandId = null;
+    setTimeout(() => { titleInput.focus(); titleInput.select(); }, 0);
+  }
 }
 
-function openQuickCreateDemand(defaultStatus) {
+// Cria a demanda na hora, sem pedir nome nem cliente antes — abre direto pra edição (título em foco).
+async function quickCreateDemandInstant(defaultStatus) {
   if (!state.clients.length) { toast('Cadastre um cliente antes de criar demandas.', 'warn'); return; }
-  const statusDefault = defaultStatus || 'em_briefing';
-  showModal(`
-    <h2>Nova demanda</h2>
-    <label>Projeto / Cliente</label>
-    <select id="qc-client" style="width:100%">
-      ${state.clients.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}
-    </select>
-    <label>Demanda</label>
-    <input type="text" id="qc-title" style="width:100%" placeholder="ex: Reels de lançamento" />
-    <p style="color:var(--text-dim);font-size:12px;margin-top:10px">Depois de criada, os demais campos (briefing, formato, prazos, etc.) salvam automaticamente conforme você edita.</p>
-    <div class="modal-footer">
-      <button class="btn secondary" id="btn-cancel">Cancelar</button>
-      <button class="btn" id="btn-create">Criar demanda</button>
-    </div>
-  `);
-  document.getElementById('btn-cancel').onclick = closeModal;
-  document.getElementById('btn-create').onclick = async () => {
-    const title = document.getElementById('qc-title').value.trim();
-    if (!title) { toast('Informe o nome da demanda.', 'warn'); return; }
-    const payload = {
-      client_id: document.getElementById('qc-client').value,
-      title,
-      format: [], platform: [],
-      status: statusDefault,
-      needs_capture: true,
-      priority: 'normal',
-      forecast: 'prevista',
-    };
-    const created = await api('/demands', { method: 'POST', body: JSON.stringify(payload) });
-    await loadAll();
-    render();
-    openDemandModal(state.demands.find((d) => d.id === created.id) || created);
+  const lastClientId = state.lastUsedClientId && state.clients.some((c) => c.id === state.lastUsedClientId)
+    ? state.lastUsedClientId
+    : state.clients[0].id;
+  const payload = {
+    client_id: lastClientId,
+    title: '',
+    format: [], platform: [],
+    status: defaultStatus || 'em_briefing',
+    needs_capture: true,
+    priority: 'normal',
+    forecast: 'prevista',
   };
+  const created = await api('/demands', { method: 'POST', body: JSON.stringify(payload) });
+  await loadAll();
+  render();
+  state.focusTitleForDemandId = created.id;
+  openDemandModal(state.demands.find((d) => d.id === created.id) || created);
 }
 
 // ---------- Notificações ----------

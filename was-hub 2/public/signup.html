@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Criar workspace — WAS</title>
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .auth-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .auth-card {
+    width: 400px; max-width: 100%; background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 32px 28px; box-shadow: var(--shadow-2);
+  }
+  .auth-brand { font-weight: 800; font-size: 22px; letter-spacing: -0.02em; margin-bottom: 4px; }
+  .auth-brand span { color: var(--blue); }
+  .auth-sub { color: var(--text-dim); font-size: 13px; margin: 0 0 22px; }
+  .auth-field { margin-bottom: 14px; }
+  .auth-field label { font-size: 12px; color: var(--text-dim); display: block; margin-bottom: 5px; }
+  .auth-field input {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 11px; border-radius: var(--radius-sm); font-size: 13px; font-family: inherit;
+  }
+  .auth-field input:focus { outline: none; border-color: var(--blue); }
+  .auth-field .field-hint { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+  .auth-error {
+    background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); color: #fca5a5;
+    font-size: 12.5px; padding: 9px 11px; border-radius: var(--radius-sm); margin-bottom: 14px; display: none;
+  }
+  .auth-error.show { display: block; }
+  .auth-submit { width: 100%; margin-top: 6px; padding: 11px; font-size: 13.5px; }
+  .auth-footer { text-align: center; margin-top: 18px; font-size: 12.5px; color: var(--text-dim); }
+  .auth-footer a { color: var(--blue); text-decoration: none; }
+  .auth-footer a:hover { text-decoration: underline; }
+  .plan-badge {
+    display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+    color: var(--green); background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.3);
+    padding: 3px 8px; border-radius: 100px; margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+  <div class="auth-shell">
+    <div class="auth-card">
+      <div class="auth-brand">W<span>A</span>S</div>
+      <span class="plan-badge">Grátis</span>
+      <p class="auth-sub">Crie um workspace isolado pra sua equipe — clientes, demandas e automações separados de qualquer outra conta.</p>
+      <div class="auth-error" id="auth-error"></div>
+      <form id="signup-form">
+        <div class="auth-field">
+          <label>Nome da empresa / agência</label>
+          <input type="text" id="f-company" placeholder="Ex: Minha Agência" required />
+        </div>
+        <div class="auth-field">
+          <label>Seu nome</label>
+          <input type="text" id="f-name" autocomplete="name" placeholder="Ex: Ana" required />
+        </div>
+        <div class="auth-field">
+          <label>E-mail</label>
+          <input type="email" id="f-email" autocomplete="email" placeholder="voce@empresa.com" required />
+        </div>
+        <div class="auth-field">
+          <label>Senha</label>
+          <input type="password" id="f-password" autocomplete="new-password" placeholder="mínimo 4 caracteres" required />
+          <div class="field-hint">Você poderá trocar depois.</div>
+        </div>
+        <button class="btn auth-submit" type="submit" id="btn-submit">Criar workspace</button>
+      </form>
+      <div class="auth-footer">Já tem conta? <a href="/login">Entrar</a></div>
+    </div>
+  </div>
+  <script>
+    const form = document.getElementById('signup-form');
+    const errorBox = document.getElementById('auth-error');
+    const submitBtn = document.getElementById('btn-submit');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorBox.classList.remove('show');
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Criando...';
+      try {
+        const res = await fetch('/api/auth/signup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            companyName: document.getElementById('f-company').value.trim(),
+            userName: document.getElementById('f-name').value.trim(),
+            email: document.getElementById('f-email').value.trim(),
+            password: document.getElementById('f-password').value,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Não foi possível criar o workspace.');
+        window.location.href = '/';
+      } catch (err) {
+        errorBox.textContent = err.message;
+        errorBox.classList.add('show');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Criar workspace';
+      }
+    });
+  </script>
+</body>
+</html>

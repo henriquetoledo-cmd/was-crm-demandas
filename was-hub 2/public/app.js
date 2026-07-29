@@ -152,16 +152,24 @@ const state = {
   lastUsedClientId: null,
   customColumns: [],
   tableColumnOrder: [],
+  tableColumnWidths: {},
   tableSelection: null,
   tableClipboard: null,
+  dashboardFilters: { clientId: '', responsible: '' },
+  currentUser: null,
 };
 
 // ---------- API helpers ----------
 async function api(path, opts) {
   const res = await fetch('/api' + path, {
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     ...opts,
   });
+  if (res.status === 401) {
+    window.location.href = '/login';
+    throw new Error('Não autenticado');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Erro' }));
     throw new Error(err.error || 'Erro na requisição');
@@ -184,6 +192,25 @@ async function loadAll() {
   state.automations = automations;
   state.customColumns = customColumns;
   state.tableColumnOrder = normalizeColumnOrder(viewPrefs.tableColumnOrder, customColumns);
+  state.tableColumnWidths = viewPrefs.columnWidths || {};
+}
+
+function renderUserBadge() {
+  const el = document.getElementById('sidebar-user');
+  if (!el || !state.currentUser) return;
+  const u = state.currentUser;
+  el.innerHTML = `
+    <div class="su-avatar">${initials(u.name)}</div>
+    <div class="su-info">
+      <div class="su-name">${escapeHtml(u.name)}</div>
+      <div class="su-tenant">${escapeHtml(u.tenantName)}</div>
+    </div>
+    <button class="su-logout" id="btn-logout" title="Sair">⏻</button>
+  `;
+  document.getElementById('btn-logout').onclick = async () => {
+    await api('/auth/logout', { method: 'POST' });
+    window.location.href = '/login';
+  };
 }
 
 function clientById(id) {
@@ -286,6 +313,26 @@ function computeDeadlineAlerts() {
     .filter((g) => g.items.length);
 }
 
+const STAGE_ALERT_STATUS_OPTIONS = ['aguardando_captacao', 'a_fazer_design', 'pronto_envio_design'];
+const STAGE_ALERT_AUDIENCE_LABELS = {
+  filmmakers: 'Filmmakers', designers: 'Designers', social_media: 'Social Media', responsible: 'Responsável pela demanda',
+};
+function audienceRole(audience) {
+  return { filmmakers: 'Filmmaker', designers: 'Designer', social_media: 'Social Media' }[audience] || null;
+}
+
+function computeStageAlerts() {
+  const autos = (state.automations || []).filter((a) => a.active && a.kind === 'stage_alert');
+  return autos.map((auto) => {
+    const status = auto.trigger.status;
+    const audience = auto.action.audience;
+    const items = state.demands.filter((d) => d.status === status);
+    const role = audienceRole(audience);
+    const audienceNames = role ? activeTeamNames().filter((n) => (state.team.find((t) => t.name === n).roles || []).includes(role)) : null;
+    return { auto, status, audience, audienceNames, items };
+  }).filter((g) => g.items.length);
+}
+
 function computeWeeklySummary() {
   const hasActive = (state.automations || []).some((a) => a.active && a.kind === 'weekly_summary');
   if (!hasActive) return null;
@@ -332,7 +379,8 @@ function computeNotifications() {
 
   const deadlineAlerts = computeDeadlineAlerts();
   const weeklySummary = computeWeeklySummary();
-  return { overdue, dueToday, dueTomorrow, captureSoon, designerSoon, waitingClient, deadlineAlerts, weeklySummary };
+  const stageAlerts = computeStageAlerts();
+  return { overdue, dueToday, dueTomorrow, captureSoon, designerSoon, waitingClient, deadlineAlerts, weeklySummary, stageAlerts };
 }
 
 function updateNavBadges() {
@@ -410,18 +458,46 @@ function computeClientHealth() {
     .sort((a, b) => b.score - a.score);
 }
 
+function computeWorkload(demandsForWorkload) {
+  const byName = {};
+  demandsForWorkload.forEach((d) => {
+    if (!d.responsible || DONE_STATUSES.includes(d.status)) return;
+    byName[d.responsible] = (byName[d.responsible] || 0) + 1;
+  });
+  return Object.entries(byName).sort((a, b) => b[1] - a[1]);
+}
+
 function renderDashboard(main) {
+  const f = state.dashboardFilters;
+  const scoped = state.demands.filter((d) => {
+    if (f.clientId && d.client_id !== f.clientId) return false;
+    if (f.responsible && d.responsible !== f.responsible) return false;
+    return true;
+  });
+
   const totalClients = state.clients.filter((c) => c.status === 'ativo').length;
-  const totalDemands = state.demands.length;
-  const overdue = state.demands.filter((d) => d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status)).length;
-  const waitingClient = state.demands.filter((d) => d.status === 'em_aprovacao_cliente' || d.status === 'aprovacao_briefing').length;
+  const pipeline = scoped.filter((d) => !DONE_STATUSES.includes(d.status));
+  const totalDemands = pipeline.length;
+  const overdue = pipeline.filter((d) => d.prazo_final && d.prazo_final < todayStr()).length;
+  const soon = pipeline.filter((d) => {
+    if (!d.prazo_final || d.prazo_final < todayStr()) return false;
+    const days = Math.round((new Date(d.prazo_final) - new Date(todayStr())) / 86400000);
+    return days <= 3;
+  }).length;
+  const waitingClient = scoped.filter((d) => d.status === 'em_aprovacao_cliente' || d.status === 'aprovacao_briefing').length;
+  const urgent = pipeline.filter((d) => d.priority === 'urgente').length;
+  const readyToPost = scoped.filter((d) => d.status === 'postar' || d.status === 'programado').length;
 
-  const recentDemands = [...state.demands]
-    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
-    .slice(0, 6);
-
-  const formatCounts = computeFormatCounts();
+  const formatCounts = (() => {
+    const counts = {};
+    pipeline.forEach((d) => (d.format || []).forEach((fm) => { counts[fm] = (counts[fm] || 0) + 1; }));
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  })();
   const maxFormatCount = formatCounts.length ? formatCounts[0][1] : 0;
+
+  const workload = computeWorkload(scoped);
+  const maxWorkload = workload.length ? workload[0][1] : 0;
+
   const health = computeClientHealth();
 
   main.innerHTML = `
@@ -431,11 +507,27 @@ function renderDashboard(main) {
         <p>Visão geral da operação da WAS</p>
       </div>
     </div>
+
+    <div class="dash-filters">
+      <select id="dash-filter-client">
+        <option value="">Todos os clientes</option>
+        ${state.clients.filter((c) => c.status === 'ativo').map((c) => `<option value="${c.id}" ${f.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+      </select>
+      <select id="dash-filter-responsible">
+        <option value="">Todos os responsáveis</option>
+        ${activeTeamNames().map((n) => `<option value="${escapeHtml(n)}" ${f.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+      </select>
+      ${(f.clientId || f.responsible) ? '<button class="btn secondary small" id="dash-filter-clear">Limpar filtros</button>' : ''}
+    </div>
+
     <div class="grid-cards">
       <div class="stat-card"><div class="num">${totalClients}</div><div class="label">Clientes ativos</div></div>
       <div class="stat-card"><div class="num">${totalDemands}</div><div class="label">Demandas no pipeline</div></div>
       <div class="stat-card"><div class="num" style="color:${overdue ? 'var(--red)' : 'var(--text)'}">${overdue}</div><div class="label">Atrasadas</div></div>
+      <div class="stat-card"><div class="num" style="color:${soon ? 'var(--yellow)' : 'var(--text)'}">${soon}</div><div class="label">Vencem em até 3 dias</div></div>
+      <div class="stat-card"><div class="num" style="color:${urgent ? 'var(--red)' : 'var(--text)'}">${urgent}</div><div class="label">Prioridade urgente</div></div>
       <div class="stat-card"><div class="num" style="color:${waitingClient ? 'var(--yellow)' : 'var(--text)'}">${waitingClient}</div><div class="label">Aguardando cliente</div></div>
+      <div class="stat-card"><div class="num">${readyToPost}</div><div class="label">Prontas p/ postar</div></div>
     </div>
 
     <div class="dash-split">
@@ -455,51 +547,62 @@ function renderDashboard(main) {
       </div>
 
       <div class="dash-panel">
-        <h2>Termômetro de clientes</h2>
-        <p class="dash-panel-sub">Quem está mais encavalado e quem está em dia</p>
-        ${health.length ? `
-          <div class="health-list">
-            ${health.slice(0, 8).map((h) => {
-              const def = HEALTH_DEFS[h.status];
-              const metaParts = [];
-              if (h.overdue) metaParts.push(`${h.overdue} atrasada${h.overdue === 1 ? '' : 's'}`);
-              if (h.waiting) metaParts.push(`${h.waiting} aguardando cliente`);
-              metaParts.push(`${h.pipeline} no pipeline`);
-              return `
-                <div class="health-row" data-open="${h.client.id}">
-                  <span class="health-dot">${def.icon}</span>
-                  <div class="health-info">
-                    <div class="health-name">${escapeHtml(h.client.name)}</div>
-                    <div class="health-meta">${metaParts.join(' · ')}</div>
-                  </div>
-                  <span class="tag tag-${def.color}">${def.label}</span>
-                </div>
-              `;
-            }).join('')}
+        <h2>Carga de trabalho por responsável</h2>
+        <p class="dash-panel-sub">Quem está com mais demandas em aberto agora</p>
+        ${workload.length ? `
+          <div class="format-bars">
+            ${workload.map(([name, count]) => `
+              <div class="format-bar-row">
+                <span class="format-bar-label">${escapeHtml(name)}</span>
+                <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxWorkload ? Math.round((count / maxWorkload) * 100) : 0}%"></div></div>
+                <span class="format-bar-count">${count}</span>
+              </div>
+            `).join('')}
           </div>
-        ` : '<div class="empty-state">Nenhum cliente com demandas ativas ainda.</div>'}
+        ` : '<div class="empty-state">Nenhuma demanda em aberto com responsável definido.</div>'}
       </div>
     </div>
 
-    <div class="page-header"><h1 style="font-size:16px">Últimas demandas</h1></div>
-    <div class="card-list">
-      ${recentDemands.length ? recentDemands.map((d) => {
-        const sd = statusDef(d.status);
-        return `
-        <div class="client-card" data-open="${d.id}">
-          <div>
-            <div class="name">${escapeHtml(d.title)}</div>
-            <div class="meta"><span class="tag tag-${clientColor(d.client_id)}">${escapeHtml(clientName(d.client_id))}</span> · vence ${formatDateBR(d.prazo_final) || 'sem data'}</div>
-          </div>
-          <span class="tag tag-${sd.color}">${sd.label}</span>
+    <div class="dash-panel" style="margin-bottom:30px">
+      <h2>Termômetro de clientes</h2>
+      <p class="dash-panel-sub">Quem está mais encavalado e quem está em dia</p>
+      ${health.length ? `
+        <div class="health-list health-list-scroll">
+          ${health.map((h) => {
+            const def = HEALTH_DEFS[h.status];
+            const metaParts = [];
+            if (h.overdue) metaParts.push(`${h.overdue} atrasada${h.overdue === 1 ? '' : 's'}`);
+            if (h.waiting) metaParts.push(`${h.waiting} aguardando cliente`);
+            metaParts.push(`${h.pipeline} no pipeline`);
+            return `
+              <div class="health-row" data-open="${h.client.id}">
+                <span class="health-dot">${def.icon}</span>
+                <div class="health-info">
+                  <div class="health-name">${escapeHtml(h.client.name)}</div>
+                  <div class="health-meta">${metaParts.join(' · ')}</div>
+                </div>
+                <span class="tag tag-${def.color}">${def.label}</span>
+              </div>
+            `;
+          }).join('')}
         </div>
-      `;
-      }).join('') : '<div class="empty-state">Nenhuma demanda cadastrada ainda.</div>'}
+      ` : '<div class="empty-state">Nenhum cliente com demandas ativas ainda.</div>'}
     </div>
   `;
-  main.querySelectorAll('.client-card[data-open]').forEach((el) => {
-    el.onclick = () => openDemandModal(state.demands.find((d) => d.id === el.dataset.open));
-  });
+
+  document.getElementById('dash-filter-client').onchange = (e) => {
+    state.dashboardFilters.clientId = e.target.value;
+    renderDashboard(main);
+  };
+  document.getElementById('dash-filter-responsible').onchange = (e) => {
+    state.dashboardFilters.responsible = e.target.value;
+    renderDashboard(main);
+  };
+  const clearBtn = document.getElementById('dash-filter-clear');
+  if (clearBtn) clearBtn.onclick = () => {
+    state.dashboardFilters = { clientId: '', responsible: '' };
+    renderDashboard(main);
+  };
   main.querySelectorAll('.health-row[data-open]').forEach((el) => {
     el.onclick = async () => {
       state.currentClientId = el.dataset.open;
@@ -1425,15 +1528,15 @@ function renderDemandCard(d) {
   } else {
     captureBadge = '<span class="tag tag-default">captação a definir</span>';
   }
-  const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
+  const urg = urgencyClass(d);
   return `
-    <div class="demand-card" data-id="${d.id}" draggable="true">
+    <div class="demand-card ${urg}" data-id="${d.id}" draggable="true">
       <div class="title">${escapeHtml(d.title)}</div>
       ${tags ? `<div class="tag-group">${tags}</div>` : ''}
       <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}</div>
       <div class="sub">
         <span><span class="priority-dot ${d.priority}"></span>${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</span>
-        <span class="${overdue ? 'overdue-text' : ''}">${formatDateBR(d.prazo_final) || formatDateBR(d.prazo_designer) || ''}</span>
+        <span class="${urg ? urg + '-text' : ''}">${formatDateBR(d.prazo_final) || formatDateBR(d.prazo_designer) || ''}</span>
       </div>
     </div>
   `;
@@ -1462,6 +1565,9 @@ function columnLabel(colId) {
 
 function saveColumnOrder() {
   api('/view-prefs', { method: 'PUT', body: JSON.stringify({ tableColumnOrder: state.tableColumnOrder }) });
+}
+function saveColumnWidths() {
+  api('/view-prefs', { method: 'PUT', body: JSON.stringify({ columnWidths: state.tableColumnWidths }) });
 }
 
 // valor "puro" de uma célula (usado por copiar/colar) — arrays voltam como cópia
@@ -1619,31 +1725,55 @@ function handleTableKeydown(e) {
 }
 document.addEventListener('keydown', handleTableKeydown);
 
-function openAddColumnPopover(anchorEl) {
-  const root = document.getElementById('ctx-menu-root');
-  const rect = anchorEl.getBoundingClientRect();
-  const left = Math.min(rect.left, window.innerWidth - 220);
-  root.innerHTML = `
-    <div class="inline-popover" style="left:${left}px; top:${rect.bottom + 4}px">
-      <input type="text" id="new-col-name" placeholder="Nome da coluna" style="width:100%;margin-bottom:8px" />
-      <button class="btn small" id="new-col-create" style="width:100%">Criar coluna</button>
+const COLUMN_TYPE_OPTIONS = [
+  { key: 'text', label: 'Texto' },
+  { key: 'select', label: 'Seleção única' },
+  { key: 'multi', label: 'Múltipla escolha' },
+  { key: 'date', label: 'Data' },
+  { key: 'number', label: 'Número' },
+  { key: 'checkbox', label: 'Caixa de seleção' },
+];
+const COLUMN_OPTION_COLORS = ['green', 'blue', 'purple', 'yellow', 'orange', 'pink', 'red', 'brown', 'gray'];
+
+function openAddColumnModal() {
+  showModal(`
+    <h2>Nova coluna</h2>
+    <label>Nome</label>
+    <input type="text" id="nc-name" style="width:100%" placeholder="ex: Observação interna" />
+    <label>Tipo</label>
+    <select id="nc-type" style="width:100%">
+      ${COLUMN_TYPE_OPTIONS.map((o) => `<option value="${o.key}">${o.label}</option>`).join('')}
+    </select>
+    <div id="nc-options-wrap" class="hidden">
+      <label>Opções (uma por linha)</label>
+      <textarea id="nc-options" placeholder="Alta&#10;Média&#10;Baixa" style="min-height:80px"></textarea>
     </div>
-  `;
-  const input = document.getElementById('new-col-name');
-  setTimeout(() => input.focus(), 0);
-  async function create() {
-    const name = input.value.trim();
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Cancelar</button>
+      <button class="btn" id="btn-create">Criar coluna</button>
+    </div>
+  `);
+  document.getElementById('nc-type').onchange = (e) => {
+    document.getElementById('nc-options-wrap').classList.toggle('hidden', !['select', 'multi'].includes(e.target.value));
+  };
+  document.getElementById('btn-cancel').onclick = closeModal;
+  document.getElementById('btn-create').onclick = async () => {
+    const name = document.getElementById('nc-name').value.trim();
     if (!name) { toast('Dê um nome pra coluna.', 'warn'); return; }
-    const col = await api('/custom-columns', { method: 'POST', body: JSON.stringify({ name }) });
+    const type = document.getElementById('nc-type').value;
+    let options = [];
+    if (type === 'select' || type === 'multi') {
+      const lines = document.getElementById('nc-options').value.split('\n').map((l) => l.trim()).filter(Boolean);
+      options = lines.map((v, i) => ({ value: v, color: COLUMN_OPTION_COLORS[i % COLUMN_OPTION_COLORS.length] }));
+    }
+    const col = await api('/custom-columns', { method: 'POST', body: JSON.stringify({ name, type, options }) });
     state.customColumns.push(col);
     state.tableColumnOrder.push(col.id);
-    root.innerHTML = '';
+    closeModal();
     renderDemandas(document.getElementById('main'));
     toast('Coluna criada.', 'success');
-  }
-  document.getElementById('new-col-create').onclick = create;
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); create(); } e.stopPropagation(); });
-  setTimeout(() => document.addEventListener('click', (e) => { if (!root.contains(e.target)) root.innerHTML = ''; }, { once: true }), 0);
+  };
+  setTimeout(() => document.getElementById('nc-name').focus(), 0);
 }
 
 // ---------- Tabela: edição inline (sem abrir o card) + edição em massa estilo Excel ----------
@@ -1665,6 +1795,38 @@ function patchCustomField(demand, colId, value) {
   const idx = state.demands.findIndex((d) => d.id === demand.id);
   if (idx > -1) state.demands[idx].custom_fields = demand.custom_fields;
   patchCustomFieldDebounced(demand.id, colId, value);
+}
+
+function urgencyClass(d) {
+  if (DONE_STATUSES.includes(d.status)) return '';
+  const today = todayStr();
+  if (!d.prazo_final) return '';
+  if (d.prazo_final < today) return 'urgency-red';
+  if (d.prazo_final <= addDaysStr(today, 3)) return 'urgency-yellow';
+  return '';
+}
+
+function openInlineSinglePopover(anchorEl, options, selectedValue, onChange) {
+  const root = document.getElementById('ctx-menu-root');
+  const rect = anchorEl.getBoundingClientRect();
+  const left = Math.min(rect.left, window.innerWidth - 220);
+  root.innerHTML = `
+    <div class="inline-popover" style="left:${left}px; top:${rect.bottom + 4}px">
+      ${options.length ? options.map((o) => `
+        <div class="single-opt ${o.value === selectedValue ? 'active' : ''}" data-value="${escapeHtml(o.value)}">
+          ${o.color ? `<span class="opt-dot tag-${o.color}"></span>` : ''}${escapeHtml(o.label)}
+        </div>
+      `).join('') : '<div class="filter-popover-empty">Nada disponível.</div>'}
+    </div>
+  `;
+  root.querySelectorAll('.single-opt').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      root.innerHTML = '';
+      onChange(el.dataset.value);
+    };
+  });
+  setTimeout(() => document.addEventListener('click', () => { root.innerHTML = ''; }, { once: true }), 0);
 }
 
 function openInlineMultiPopover(anchorEl, options, selectedValues, onChange) {
@@ -1696,31 +1858,33 @@ function openInlineMultiPopover(anchorEl, options, selectedValues, onChange) {
 
 function renderTableCell(colId, d, rowIndex, teamNames) {
   const attrs = `data-row="${rowIndex}" data-col="${colId}"`;
+  const urg = urgencyClass(d);
   if (colId === 'title') {
     return `<td class="td-title" ${attrs}><input type="text" class="cell-input cell-title" data-id="${d.id}" value="${escapeHtml(d.title)}" /></td>`;
   }
   if (colId === 'client') {
-    return `<td ${attrs}><select class="cell-select" data-id="${d.id}" data-field="client_id">${state.clients.map((c) => `<option value="${c.id}" ${d.client_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select></td>`;
+    return `<td ${attrs}><button class="cell-select-btn" data-id="${d.id}" data-field="client_id">${escapeHtml(clientName(d.client_id))}</button></td>`;
   }
   if (colId === 'status') {
-    return `<td ${attrs}><select class="cell-select tag-${statusDef(d.status).color}" data-id="${d.id}" data-field="status">${STAGES.map((stage) => `<optgroup label="${stage.label}">${STATUS_DEFS.filter((s) => s.stage === stage.key).map((s) => `<option value="${s.key}" ${d.status === s.key ? 'selected' : ''}>${s.label}</option>`).join('')}</optgroup>`).join('')}</select></td>`;
+    const sd = statusDef(d.status);
+    const colorClass = urg || `tag-${sd.color}`;
+    return `<td ${attrs}><button class="cell-select-btn ${colorClass}" data-id="${d.id}" data-field="status">${escapeHtml(sd.label)}</button></td>`;
   }
   if (colId === 'format' || colId === 'platform') {
     return `<td ${attrs}><button class="cell-multi-btn" data-id="${d.id}" data-field="${colId}">${(d[colId] || []).join(', ') || '+ adicionar'}</button></td>`;
   }
   if (colId === 'responsible') {
-    const respOptions = d.responsible && !teamNames.includes(d.responsible) ? [...teamNames, d.responsible] : teamNames;
-    return `<td ${attrs}><select class="cell-select" data-id="${d.id}" data-field="responsible"><option value="">—</option>${respOptions.map((n) => `<option value="${escapeHtml(n)}" ${d.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select></td>`;
+    return `<td ${attrs}><button class="cell-select-btn" data-id="${d.id}" data-field="responsible">${escapeHtml(d.responsible) || '—'}</button></td>`;
   }
   if (colId === 'priority') {
-    return `<td ${attrs}><select class="cell-select" data-id="${d.id}" data-field="priority">${PRIORIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${d.priority === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}</select></td>`;
+    const pd = PRIORIDADE_OPTIONS.find((p) => p.key === d.priority) || {};
+    return `<td ${attrs}><button class="cell-select-btn" data-id="${d.id}" data-field="priority">${escapeHtml(pd.label || d.priority)}</button></td>`;
   }
   if (colId === 'prazo_designer') {
     return `<td ${attrs}><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_designer" value="${d.prazo_designer || ''}" /></td>`;
   }
   if (colId === 'prazo_final') {
-    const overdue = d.prazo_final && d.prazo_final < todayStr() && !DONE_STATUSES.includes(d.status);
-    return `<td class="${overdue ? 'overdue-cell' : ''}" ${attrs}><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_final" value="${d.prazo_final || ''}" /></td>`;
+    return `<td class="${urg ? urg + '-cell' : ''}" ${attrs}><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_final" value="${d.prazo_final || ''}" /></td>`;
   }
   if (colId === 'captacao') {
     return `<td class="cell-capture">
@@ -1729,6 +1893,31 @@ function renderTableCell(colId, d, rowIndex, teamNames) {
     </td>`;
   }
   const val = (d.custom_fields && d.custom_fields[colId]) || '';
+  return renderCustomCell(colId, d, attrs, val);
+}
+
+// Renderiza a célula de uma coluna customizada de acordo com o tipo escolhido na criação.
+function renderCustomCell(colId, d, attrs, val) {
+  const col = state.customColumns.find((c) => c.id === colId);
+  const type = col ? col.type : 'text';
+  if (type === 'select') {
+    const opts = col.options || [];
+    const opt = opts.find((o) => o.value === val);
+    return `<td ${attrs}><button class="cell-select-btn" data-id="${d.id}" data-customcol="${colId}" data-customtype="select">${val ? escapeHtml((opt || {}).value || val) : '—'}</button></td>`;
+  }
+  if (type === 'multi') {
+    const arr = Array.isArray(val) ? val : (val ? [val] : []);
+    return `<td ${attrs}><button class="cell-multi-btn" data-id="${d.id}" data-customcol="${colId}" data-customtype="multi">${arr.join(', ') || '+ adicionar'}</button></td>`;
+  }
+  if (type === 'date') {
+    return `<td ${attrs}><input type="date" class="cell-input cell-custom-date" data-id="${d.id}" data-customcol="${colId}" value="${val || ''}" /></td>`;
+  }
+  if (type === 'number') {
+    return `<td ${attrs}><input type="number" class="cell-input cell-custom" data-id="${d.id}" data-customcol="${colId}" value="${val || ''}" /></td>`;
+  }
+  if (type === 'checkbox') {
+    return `<td class="cell-capture" ${attrs}><label class="capture-toggle"><input type="checkbox" class="cell-custom-checkbox" data-id="${d.id}" data-customcol="${colId}" ${val ? 'checked' : ''} /></label></td>`;
+  }
   return `<td ${attrs}><input type="text" class="cell-input cell-custom" data-id="${d.id}" data-customcol="${colId}" value="${escapeHtml(val)}" /></td>`;
 }
 
@@ -1738,18 +1927,22 @@ function renderDemandTable(root, filtered) {
   state.tableRowIds = sorted.map((d) => d.id);
   const totalCols = state.tableColumnOrder.length + 3; // checkbox + colunas + spacer da coluna "+" + expandir
 
-  const headerCells = state.tableColumnOrder.map((colId) => `
-    <th draggable="true" data-col="${colId}" class="th-draggable">
+  const headerCells = state.tableColumnOrder.map((colId) => {
+    const w = state.tableColumnWidths[colId];
+    return `
+    <th draggable="true" data-col="${colId}" class="th-draggable" ${w ? `style="width:${w}px"` : ''}>
       <span class="th-label">${escapeHtml(columnLabel(colId))}</span>
       ${state.customColumns.some((c) => c.id === colId) ? `<span class="th-del" data-delcol="${colId}" title="Excluir coluna">×</span>` : ''}
+      <span class="th-resize-handle" data-resize="${colId}"></span>
     </th>
-  `).join('');
+  `;
+  }).join('');
 
   root.innerHTML = `
     <div id="bulk-bar-slot"></div>
-    <p class="table-hint">Arraste pra selecionar células · Ctrl+C / Ctrl+V pra colar em massa · Delete pra limpar — como no Excel.</p>
+    <p class="table-hint">Arraste pra selecionar células · Ctrl+C / Ctrl+V pra colar em massa · Delete pra limpar · arraste a borda da coluna pra redimensionar — como no Excel.</p>
     <div class="table-wrap">
-      <table class="data-table editable">
+      <table class="data-table editable" style="table-layout:fixed">
         <thead>
           <tr>
             <th style="width:30px"><input type="checkbox" id="check-all" /></th>
@@ -1828,21 +2021,61 @@ function renderDemandTable(root, filtered) {
     });
   });
 
-  root.querySelectorAll('.cell-select').forEach((sel) => {
-    sel.onchange = () => {
-      const demand = state.demands.find((d) => d.id === sel.dataset.id);
-      patchInline(demand, { [sel.dataset.field]: sel.value });
+  root.querySelectorAll('.cell-select-btn').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const demand = state.demands.find((d) => d.id === btn.dataset.id);
+      if (btn.dataset.customcol) {
+        const col = state.customColumns.find((c) => c.id === btn.dataset.customcol);
+        const opts = (col.options || []).map((o) => ({ value: o.value, label: o.value, color: o.color }));
+        const current = (demand.custom_fields && demand.custom_fields[col.id]) || '';
+        openInlineSinglePopover(btn, opts, current, (val) => patchCustomField(demand, col.id, val));
+        return;
+      }
+      const field = btn.dataset.field;
+      let options, current;
+      if (field === 'client_id') {
+        options = state.clients.map((c) => ({ value: c.id, label: c.name }));
+        current = demand.client_id;
+      } else if (field === 'status') {
+        options = STATUS_DEFS.map((s) => ({ value: s.key, label: s.label, color: s.color }));
+        current = demand.status;
+      } else if (field === 'responsible') {
+        const respOptions = demand.responsible && !teamNames.includes(demand.responsible) ? [...teamNames, demand.responsible] : teamNames;
+        options = [{ value: '', label: '— Sem responsável —' }, ...respOptions.map((n) => ({ value: n, label: n }))];
+        current = demand.responsible || '';
+      } else if (field === 'priority') {
+        options = PRIORIDADE_OPTIONS.map((p) => ({ value: p.key, label: p.label, color: p.color }));
+        current = demand.priority;
+      }
+      openInlineSinglePopover(btn, options, current, (val) => patchInline(demand, { [field]: val }));
     };
   });
 
   root.querySelectorAll('input[type=date].cell-input').forEach((inp) => {
     inp.onchange = () => {
       const demand = state.demands.find((d) => d.id === inp.dataset.id);
+      if (inp.dataset.customcol) { patchCustomField(demand, inp.dataset.customcol, inp.value); return; }
       patchInline(demand, { [inp.dataset.field]: inp.value });
     };
   });
 
-  root.querySelectorAll('.cell-custom').forEach((input) => {
+  root.querySelectorAll('input[type=number].cell-custom').forEach((inp) => {
+    inp.addEventListener('input', () => {
+      const demand = state.demands.find((d) => d.id === inp.dataset.id);
+      patchCustomField(demand, inp.dataset.customcol, inp.value);
+    });
+  });
+
+  root.querySelectorAll('.cell-custom-checkbox').forEach((cb) => {
+    cb.onclick = (e) => e.stopPropagation();
+    cb.onchange = () => {
+      const demand = state.demands.find((d) => d.id === cb.dataset.id);
+      patchCustomField(demand, cb.dataset.customcol, cb.checked);
+    };
+  });
+
+  root.querySelectorAll('input[type=text].cell-custom').forEach((input) => {
     input.addEventListener('input', () => {
       const demand = state.demands.find((d) => d.id === input.dataset.id);
       patchCustomField(demand, input.dataset.customcol, input.value);
@@ -1868,6 +2101,13 @@ function renderDemandTable(root, filtered) {
     btn.onclick = (e) => {
       e.stopPropagation();
       const demand = state.demands.find((d) => d.id === btn.dataset.id);
+      if (btn.dataset.customcol) {
+        const col = state.customColumns.find((c) => c.id === btn.dataset.customcol);
+        const opts = (col.options || []).map((o) => o.value);
+        const current = (demand.custom_fields && demand.custom_fields[col.id]) || [];
+        openInlineMultiPopover(btn, opts, Array.isArray(current) ? current : [], (next) => patchCustomField(demand, col.id, next));
+        return;
+      }
       const field = btn.dataset.field;
       const options = (field === 'format' ? FORMATO_OPTIONS : PLATAFORMA_OPTIONS).map((o) => o.name);
       openInlineMultiPopover(btn, options, demand[field] || [], (next) => {
@@ -1916,7 +2156,7 @@ function renderDemandTable(root, filtered) {
   let dragColId = null;
   root.querySelectorAll('th.th-draggable').forEach((th) => {
     th.addEventListener('dragstart', (e) => {
-      if (e.target.closest('.th-del')) { e.preventDefault(); return; }
+      if (e.target.closest('.th-del') || e.target.closest('.th-resize-handle')) { e.preventDefault(); return; }
       dragColId = th.dataset.col;
       e.dataTransfer.effectAllowed = 'move';
     });
@@ -1938,6 +2178,28 @@ function renderDemandTable(root, filtered) {
     });
   });
 
+  root.querySelectorAll('.th-resize-handle').forEach((handle) => {
+    handle.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const th = handle.closest('th');
+      const colId = handle.dataset.resize;
+      const startX = e.clientX;
+      const startWidth = th.offsetWidth;
+      function onMove(ev) {
+        th.style.width = Math.max(60, startWidth + (ev.clientX - startX)) + 'px';
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        state.tableColumnWidths[colId] = th.offsetWidth;
+        saveColumnWidths();
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+
   root.querySelectorAll('[data-delcol]').forEach((el) => {
     el.onclick = async (e) => {
       e.stopPropagation();
@@ -1952,7 +2214,7 @@ function renderDemandTable(root, filtered) {
     };
   });
 
-  document.getElementById('btn-add-column').onclick = (e) => openAddColumnPopover(e.currentTarget);
+  document.getElementById('btn-add-column').onclick = () => openAddColumnModal();
 }
 function renderBulkBar(slot) {
   const n = state.selectedDemandIds.size;
@@ -2252,6 +2514,17 @@ function renderNotificacoes(main) {
     return renderNotifSection(label, 'blue', g.items.length, rows);
   }).join('');
 
+  const stageAlertHtml = n.stageAlerts.map((g) => {
+    const statusLabel = statusDef(g.status).label;
+    const audienceLabel = STAGE_ALERT_AUDIENCE_LABELS[g.audience] || g.audience;
+    const label = `📣 ${escapeHtml(statusLabel)} → avisar ${escapeHtml(audienceLabel)}`;
+    const rows = g.items.map((d) => {
+      const who = g.audienceNames ? g.audienceNames.join(', ') : (d.responsible || 'sem responsável definido');
+      return notifRow('📣', d.title, `${escapeHtml(clientName(d.client_id))} · avisar ${escapeHtml(who)}`, d);
+    }).join('');
+    return renderNotifSection(label, 'purple', g.items.length, rows);
+  }).join('');
+
   const sections = [
     renderNotifSection('Atrasadas', 'red', n.overdue.length, overdueHtml),
     renderNotifSection('Vencem hoje', 'orange', n.dueToday.length, todayHtml),
@@ -2260,6 +2533,7 @@ function renderNotificacoes(main) {
     renderNotifSection('Prazo do designer nos próximos dias', 'yellow', n.designerSoon.length, designerHtml),
     renderNotifSection('Aguardando aprovação do cliente', 'blue', n.waitingClient.length, waitingHtml),
     automationHtml,
+    stageAlertHtml,
   ].join('');
 
   let weeklyHtml = '';
@@ -2372,6 +2646,22 @@ function renderAutomationRules(root) {
         </div>
       `;
     }
+    if (a.kind === 'stage_alert') {
+      const statusLabel = statusDef(a.trigger.status).label;
+      const audienceLabel = STAGE_ALERT_AUDIENCE_LABELS[a.action.audience] || a.action.audience;
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">📣 <span class="tag tag-purple">Alerta de fase</span></div>
+            <div class="meta">Quando status vira <strong>${escapeHtml(statusLabel)}</strong>, avisar <strong>${escapeHtml(audienceLabel)}</strong></div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
     return `
     <div class="client-card">
       <div>
@@ -2428,6 +2718,7 @@ function openAutomationModal() {
     <select id="auto-kind" style="width:100%">
       <option value="field">Regra de campo (quando X, definir Y)</option>
       <option value="deadline">Alerta de prazo (avisar antes de vencer)</option>
+      <option value="stage_alert">Alerta de fase (avisar equipe na mudança de status)</option>
       <option value="weekly_summary">Resumo semanal (toda segunda-feira)</option>
     </select>
     <div id="auto-form-field">
@@ -2455,6 +2746,17 @@ function openAutomationModal() {
       </select>
       <p style="color:var(--text-dim);font-size:12px;margin-top:10px">O alerta aparece na Central de Notificações assim que a data se aproximar — não precisa reabrir a demanda.</p>
     </div>
+    <div id="auto-form-stage" class="hidden">
+      <label style="margin-top:14px">Quando o status virar</label>
+      <select id="auto-stage-status" style="width:100%">
+        ${STAGE_ALERT_STATUS_OPTIONS.map((v) => `<option value="${v}">${escapeHtml(statusDef(v).label)}</option>`).join('')}
+      </select>
+      <label>Avisar</label>
+      <select id="auto-stage-audience" style="width:100%">
+        ${Object.entries(STAGE_ALERT_AUDIENCE_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
+      </select>
+      <p style="color:var(--text-dim);font-size:12px;margin-top:10px">O alerta aparece na Central de Notificações para todas as demandas que estiverem nesse status.</p>
+    </div>
     <div id="auto-form-weekly" class="hidden">
       <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Toda segunda-feira, a Central de Notificações mostra um resumo com tudo que vence naquela semana, agrupado por dia. Não requer configuração adicional.</p>
     </div>
@@ -2478,6 +2780,7 @@ function openAutomationModal() {
     const kind = e.target.value;
     document.getElementById('auto-form-field').classList.toggle('hidden', kind !== 'field');
     document.getElementById('auto-form-deadline').classList.toggle('hidden', kind !== 'deadline');
+    document.getElementById('auto-form-stage').classList.toggle('hidden', kind !== 'stage_alert');
     document.getElementById('auto-form-weekly').classList.toggle('hidden', kind !== 'weekly_summary');
   };
 
@@ -2491,6 +2794,13 @@ function openAutomationModal() {
         active: true,
         trigger: { field: document.getElementById('auto-deadline-field').value, daysBefore: Number(document.getElementById('auto-deadline-days').value) },
         action: {},
+      };
+    } else if (kind === 'stage_alert') {
+      payload = {
+        kind: 'stage_alert',
+        active: true,
+        trigger: { status: document.getElementById('auto-stage-status').value },
+        action: { audience: document.getElementById('auto-stage-audience').value },
       };
     } else if (kind === 'weekly_summary') {
       payload = { kind: 'weekly_summary', active: true, trigger: {}, action: {} };
@@ -2627,6 +2937,13 @@ function closeModal() {
 
 // ---------- Init ----------
 (async function init() {
+  try {
+    const me = await api('/auth/me');
+    state.currentUser = me.user;
+  } catch (e) {
+    return; // api() já redireciona pra /login em caso de 401
+  }
+  renderUserBadge();
   await loadAll();
   render();
 })();

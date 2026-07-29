@@ -55,7 +55,34 @@ a { color: var(--blue); text-decoration: none; }
   border-right: 1px solid var(--border);
   padding: 22px 12px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
+
+.sidebar-user {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 8px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 16px;
+}
+.su-avatar {
+  width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--blue), var(--blue-dim));
+  color: white; font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.su-info { flex: 1; min-width: 0; }
+.su-name { font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.su-tenant { font-size: 10.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.su-logout {
+  background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 15px;
+  padding: 4px 6px; border-radius: 6px; flex-shrink: 0; transition: background .12s, color .12s;
+}
+.su-logout:hover { background: rgba(239,68,68,.12); color: var(--red); }
 
 .brand {
   font-weight: 800;
@@ -166,6 +193,13 @@ a { color: var(--blue); text-decoration: none; }
 .health-info { flex: 1; min-width: 0; }
 .health-name { font-size: 13px; font-weight: 600; }
 .health-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.health-list-scroll { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+
+.dash-filters { display: flex; gap: 10px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
+.dash-filters select {
+  background: var(--panel); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 7px 10px; font-size: 12px; cursor: pointer;
+}
 
 .card-list { display: flex; flex-direction: column; gap: 10px; }
 
@@ -293,6 +327,12 @@ a { color: var(--blue); text-decoration: none; }
 .priority-dot.urgente { background: var(--c-red); }
 .overdue-text { color: var(--red); font-weight: 600; }
 .overdue-cell { color: var(--red); font-weight: 600; }
+.urgency-red-text { color: var(--red); font-weight: 600; }
+.urgency-yellow-text { color: var(--yellow); font-weight: 600; }
+.urgency-red-cell { color: var(--red); font-weight: 600; background: rgba(239,68,68,.08); }
+.urgency-yellow-cell { color: var(--yellow); font-weight: 600; background: rgba(234,179,8,.08); }
+.demand-card.urgency-red { border-left: 3px solid var(--red); }
+.demand-card.urgency-yellow { border-left: 3px solid var(--yellow); }
 
 .toolbar { display: flex; gap: 10px; margin-bottom: 18px; align-items: center; flex-wrap: wrap; position: relative; }
 select, input[type=text], input[type=email], input[type=date], textarea {
@@ -1135,6 +1175,30 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
   white-space: nowrap;
 }
 .cell-multi-btn:hover { background: var(--panel-2); border-color: var(--border); color: var(--text); }
+.cell-select-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+  width: 100%;
+}
+.cell-select-btn:hover { background: var(--panel-2); border-color: var(--border); }
+.single-opt {
+  display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text); cursor: pointer;
+  padding: 6px 8px; border-radius: 6px;
+}
+.single-opt:hover { background: var(--panel-2); }
+.single-opt.active { background: rgba(59,130,246,.14); }
+.opt-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .cell-capture { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 .capture-toggle { display: flex; align-items: center; gap: 2px; cursor: pointer; font-size: 11px; }
 .capture-toggle input { width: auto; margin: 0; }
@@ -1150,6 +1214,10 @@ td[data-row][data-col].cell-selected {
   z-index: 1;
 }
 .th-draggable { cursor: grab; display: table-cell; position: relative; }
+.th-resize-handle {
+  position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize; z-index: 2;
+}
+.th-resize-handle:hover, .th-resize-handle:active { background: rgba(59,130,246,.4); }
 .th-draggable:active { cursor: grabbing; }
 .th-draggable.th-drag-over { background: rgba(59,130,246,.18); }
 .th-label { pointer-events: none; }

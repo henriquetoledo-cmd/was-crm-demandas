@@ -46,6 +46,18 @@ const REAL_CLIENTS = [
   { name: 'Canopus', color: 'default' },
 ];
 
+// Equipe real da WAS.
+const REAL_TEAM = [
+  { name: 'Henrique', roles: ['Coringa'] },
+  { name: 'Vitória', roles: ['Coringa'] },
+  { name: 'Rebecca', roles: ['Social Media'] },
+  { name: 'Lucas', roles: ['Social Media', 'Designer'] },
+  { name: 'Enzo', roles: ['Filmmaker'] },
+  { name: 'Giuseppe', roles: ['Designer'] },
+  { name: 'Giovanne', roles: ['Designer'] },
+  { name: 'Rennan', roles: ['Designer'] },
+];
+
 // Páginas padrão criadas automaticamente para cada cliente.
 // "Calendário de Entrega" é do tipo 'calendar' — não é editada manualmente,
 // e sim gerada ao vivo a partir das demandas do cliente (prazo designer / prazo final).
@@ -59,7 +71,7 @@ const STATUS_RENAME = { nao_utilizado: 'arquivado' };
 
 // ---------- Persistência ----------
 function emptyDB() {
-  return { clients: [], demands: [], strategies: [], pages: [] };
+  return { clients: [], demands: [], strategies: [], pages: [], team: [], automations: [] };
 }
 
 function loadDB() {
@@ -74,8 +86,11 @@ function loadDB() {
   if (!db.clients) db.clients = [];
   if (!db.demands) db.demands = [];
   if (!db.strategies) db.strategies = [];
+  if (!db.team) db.team = [];
+  if (!db.automations) db.automations = [];
 
   ensureRoster(db);
+  ensureTeam(db);
   ensureDefaultPagesForAllClients(db);
   migrateStatuses(db);
   saveDB(db); // idempotente — garante que o arquivo sempre existe, mesmo na primeira vez
@@ -138,6 +153,20 @@ function ensureRoster(db) {
   });
 }
 
+function ensureTeam(db) {
+  const existingNames = new Set(db.team.map((t) => t.name.trim().toLowerCase()));
+  REAL_TEAM.forEach((rt) => {
+    if (existingNames.has(rt.name.trim().toLowerCase())) return;
+    db.team.push({
+      id: id(),
+      name: rt.name,
+      roles: rt.roles,
+      active: true,
+      created_at: new Date().toISOString(),
+    });
+  });
+}
+
 function ensureDefaultPagesForAllClients(db) {
   db.clients.forEach((c) => {
     const rootPages = db.pages.filter((p) => p.client_id === c.id && !p.parent_id);
@@ -170,6 +199,29 @@ function migrateStatuses(db) {
   db.demands.forEach((d) => {
     if (STATUS_RENAME[d.status]) d.status = STATUS_RENAME[d.status];
   });
+}
+
+// ---------- Automações ----------
+// Regras simples, avaliadas de forma síncrona sempre que uma demanda é criada/atualizada.
+// trigger: { field: 'status'|'client_id'|'format'|'platform', op: 'equals'|'contains', value }
+// action:  { field: 'responsible'|'priority'|'status', value }
+function matchTrigger(demand, trigger) {
+  if (!trigger) return false;
+  const fieldValue = demand[trigger.field];
+  if (trigger.op === 'contains') {
+    return Array.isArray(fieldValue) && fieldValue.includes(trigger.value);
+  }
+  return fieldValue === trigger.value;
+}
+
+function applyAutomations(db, demand) {
+  (db.automations || []).forEach((auto) => {
+    if (!auto.active) return;
+    if (matchTrigger(demand, auto.trigger)) {
+      demand[auto.action.field] = auto.action.value;
+    }
+  });
+  return demand;
 }
 
 // ---------- Helpers HTTP ----------
@@ -233,7 +285,7 @@ async function handleAPI(req, res, pathname, query) {
   const db = loadDB();
   const method = req.method;
   const parts = pathname.split('/').filter(Boolean); // ['api','clients', ':id']
-  const resource = parts[1]; // clients | demands | strategies | pages | portal
+  const resource = parts[1]; // clients | demands | strategies | pages | team | automations | portal
   const resId = parts[2];
 
   try {
@@ -287,6 +339,69 @@ async function handleAPI(req, res, pathname, query) {
       }
     }
 
+    // ---- TEAM (equipe WAS) ----
+    if (resource === 'team') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.team);
+      if (method === 'POST') {
+        const body = await readBody(req);
+        const member = {
+          id: id(),
+          name: body.name || 'Sem nome',
+          roles: Array.isArray(body.roles) ? body.roles : [],
+          active: body.active === undefined ? true : !!body.active,
+          created_at: new Date().toISOString(),
+        };
+        db.team.push(member);
+        saveDB(db);
+        return sendJSON(res, 201, member);
+      }
+      if (method === 'PUT' && resId) {
+        const idx = db.team.findIndex((t) => t.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
+        const body = await readBody(req);
+        db.team[idx] = { ...db.team[idx], ...body, id: resId };
+        saveDB(db);
+        return sendJSON(res, 200, db.team[idx]);
+      }
+      if (method === 'DELETE' && resId) {
+        db.team = db.team.filter((t) => t.id !== resId);
+        saveDB(db);
+        return sendJSON(res, 200, { ok: true });
+      }
+    }
+
+    // ---- AUTOMATIONS ----
+    if (resource === 'automations') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.automations);
+      if (method === 'POST') {
+        const body = await readBody(req);
+        const auto = {
+          id: id(),
+          name: body.name || 'Automação',
+          active: body.active === undefined ? true : !!body.active,
+          trigger: body.trigger || {},
+          action: body.action || {},
+          created_at: new Date().toISOString(),
+        };
+        db.automations.push(auto);
+        saveDB(db);
+        return sendJSON(res, 201, auto);
+      }
+      if (method === 'PUT' && resId) {
+        const idx = db.automations.findIndex((a) => a.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
+        const body = await readBody(req);
+        db.automations[idx] = { ...db.automations[idx], ...body, id: resId };
+        saveDB(db);
+        return sendJSON(res, 200, db.automations[idx]);
+      }
+      if (method === 'DELETE' && resId) {
+        db.automations = db.automations.filter((a) => a.id !== resId);
+        saveDB(db);
+        return sendJSON(res, 200, { ok: true });
+      }
+    }
+
     // ---- PAGES (documentos/pastas por cliente, estilo Notion) ----
     if (resource === 'pages') {
       if (method === 'GET' && !resId) {
@@ -301,7 +416,7 @@ async function handleAPI(req, res, pathname, query) {
           client_id: body.client_id,
           parent_id: body.parent_id || null,
           type: body.type === 'folder' ? 'folder' : 'page',
-          title: body.title || (body.type === 'folder' ? 'Nova pasta' : 'Novo documento'),
+          title: body.title || (body.type === 'folder' ? 'Nova pasta' : 'Nova página'),
           content: body.content || '',
           order: db.pages.filter((p) => p.client_id === body.client_id && p.parent_id === (body.parent_id || null)).length,
           created_at: new Date().toISOString(),
@@ -346,7 +461,7 @@ async function handleAPI(req, res, pathname, query) {
       }
       if (method === 'POST') {
         const body = await readBody(req);
-        const demand = {
+        let demand = {
           id: id(),
           client_id: body.client_id,
           title: body.title || 'Sem título',
@@ -367,6 +482,7 @@ async function handleAPI(req, res, pathname, query) {
           link: body.link || '',
           created_at: new Date().toISOString(),
         };
+        demand = applyAutomations(db, demand);
         db.demands.push(demand);
         saveDB(db);
         return sendJSON(res, 201, demand);
@@ -375,7 +491,9 @@ async function handleAPI(req, res, pathname, query) {
         const idx = db.demands.findIndex((d) => d.id === resId);
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
-        db.demands[idx] = { ...db.demands[idx], ...body, id: resId };
+        let demand = { ...db.demands[idx], ...body, id: resId };
+        demand = applyAutomations(db, demand);
+        db.demands[idx] = demand;
         saveDB(db);
         return sendJSON(res, 200, db.demands[idx]);
       }

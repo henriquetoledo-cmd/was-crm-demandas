@@ -1,0 +1,12 @@
+{
+  "name": "was-hub",
+  "version": "1.0.0",
+  "description": "Central de clientes, demandas e estratégia da WAS (We Are Sinergy)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

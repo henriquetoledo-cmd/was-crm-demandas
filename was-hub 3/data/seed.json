@@ -1,0 +1,83 @@
+{
+  "clients": [
+    {
+      "id": "c1demo00",
+      "name": "Cliente Exemplo",
+      "segment": "Alimentício",
+      "status": "ativo",
+      "contact_name": "Fulano de Tal",
+      "contact_email": "contato@exemplo.com",
+      "notes": "Cliente de demonstração — pode editar ou apagar.",
+      "color": "blue",
+      "portal_slug": "cliente-exemplo-demo",
+      "created_at": "2026-07-29T00:00:00.000Z"
+    }
+  ],
+  "demands": [
+    {
+      "id": "d1demo00",
+      "client_id": "c1demo00",
+      "title": "Reel institucional — julho",
+      "description": "Vídeo de 30s apresentando a marca.",
+      "format": ["Reels"],
+      "platform": ["Instagram"],
+      "status": "em_criacao_design",
+      "prazo_designer": "2026-08-03",
+      "prazo_final": "2026-08-05",
+      "responsible": "Equipe WAS",
+      "priority": "alta",
+      "forecast": "prevista",
+      "refacao": "",
+      "visible_to_client": true,
+      "link": "",
+      "created_at": "2026-07-29T00:00:00.000Z"
+    },
+    {
+      "id": "d2demo00",
+      "client_id": "c1demo00",
+      "title": "Carrossel — bastidores",
+      "description": "",
+      "format": ["Carrossel"],
+      "platform": ["Instagram"],
+      "status": "em_aprovacao_cliente",
+      "prazo_designer": "2026-07-30",
+      "prazo_final": "2026-08-01",
+      "responsible": "Equipe WAS",
+      "priority": "normal",
+      "forecast": "prevista",
+      "refacao": "",
+      "visible_to_client": true,
+      "link": "",
+      "created_at": "2026-07-29T00:00:00.000Z"
+    },
+    {
+      "id": "d3demo00",
+      "client_id": "c1demo00",
+      "title": "Identidade visual — cardápio novo",
+      "description": "",
+      "format": ["Identidade visual", "Cardápio"],
+      "platform": ["Cliente"],
+      "status": "a_fazer_design",
+      "prazo_designer": "2026-08-10",
+      "prazo_final": "2026-08-14",
+      "responsible": "",
+      "priority": "urgente",
+      "forecast": "nao_prevista",
+      "refacao": "",
+      "visible_to_client": false,
+      "link": "",
+      "created_at": "2026-07-29T00:00:00.000Z"
+    }
+  ],
+  "strategies": [
+    {
+      "id": "s1demo00",
+      "client_id": "c1demo00",
+      "title": "Estratégia de conteúdo — Agosto/2026",
+      "period": "2026-08",
+      "content": "Pilares do mês: prova social, bastidores, autoridade.\nMeta: aumentar engajamento em 15%.",
+      "visible_to_client": false,
+      "updated_at": "2026-07-29T00:00:00.000Z"
+    }
+  ]
+}

@@ -276,6 +276,22 @@ function computeDeadlineAlerts() {
     .filter((g) => g.items.length);
 }
 
+function computeWeeklySummary() {
+  const hasActive = (state.automations || []).some((a) => a.active && a.kind === 'weekly_summary');
+  if (!hasActive) return null;
+  if (new Date().getDay() !== 1) return null; // só aparece na segunda-feira
+  const today = todayStr();
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const dateStr = addDaysStr(today, i);
+    const items = state.demands.filter((d) => d.prazo_final === dateStr && !DONE_STATUSES.includes(d.status));
+    if (items.length) days.push({ dateStr, items });
+  }
+  const total = days.reduce((sum, g) => sum + g.items.length, 0);
+  if (!total) return null;
+  return { days, total };
+}
+
 function computeNotifications() {
   const today = todayStr();
   const tomorrow = addDaysStr(today, 1);
@@ -305,7 +321,8 @@ function computeNotifications() {
   });
 
   const deadlineAlerts = computeDeadlineAlerts();
-  return { overdue, dueToday, dueTomorrow, captureSoon, designerSoon, waitingClient, deadlineAlerts };
+  const weeklySummary = computeWeeklySummary();
+  return { overdue, dueToday, dueTomorrow, captureSoon, designerSoon, waitingClient, deadlineAlerts, weeklySummary };
 }
 
 function updateNavBadges() {
@@ -351,6 +368,38 @@ function closeContextMenu() {
 }
 
 // ---------- Dashboard ----------
+function computeFormatCounts() {
+  const counts = {};
+  state.demands.filter((d) => !DONE_STATUSES.includes(d.status)).forEach((d) => {
+    (d.format || []).forEach((f) => { counts[f] = (counts[f] || 0) + 1; });
+  });
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+}
+
+const HEALTH_DEFS = {
+  critico: { label: 'Atenção', color: 'red', icon: '🔴' },
+  atencao: { label: 'Fique de olho', color: 'yellow', icon: '🟡' },
+  em_dia: { label: 'Em dia', color: 'green', icon: '🟢' },
+};
+
+function computeClientHealth() {
+  return state.clients
+    .filter((c) => c.status === 'ativo')
+    .map((c) => {
+      const demands = state.demands.filter((d) => d.client_id === c.id);
+      const pipeline = demands.filter((d) => !DONE_STATUSES.includes(d.status));
+      const overdue = pipeline.filter((d) => d.prazo_final && d.prazo_final < todayStr());
+      const waiting = demands.filter((d) => d.status === 'em_aprovacao_cliente' || d.status === 'aprovacao_briefing');
+      let status = 'em_dia';
+      if (overdue.length > 0) status = 'critico';
+      else if (waiting.length >= 2 || pipeline.length >= 5) status = 'atencao';
+      const score = overdue.length * 3 + waiting.length + pipeline.length * 0.3;
+      return { client: c, pipeline: pipeline.length, overdue: overdue.length, waiting: waiting.length, status, score };
+    })
+    .filter((h) => h.pipeline > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
 function renderDashboard(main) {
   const totalClients = state.clients.filter((c) => c.status === 'ativo').length;
   const totalDemands = state.demands.length;
@@ -360,6 +409,10 @@ function renderDashboard(main) {
   const recentDemands = [...state.demands]
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
     .slice(0, 6);
+
+  const formatCounts = computeFormatCounts();
+  const maxFormatCount = formatCounts.length ? formatCounts[0][1] : 0;
+  const health = computeClientHealth();
 
   main.innerHTML = `
     <div class="page-header">
@@ -374,6 +427,50 @@ function renderDashboard(main) {
       <div class="stat-card"><div class="num" style="color:${overdue ? 'var(--red)' : 'var(--text)'}">${overdue}</div><div class="label">Atrasadas</div></div>
       <div class="stat-card"><div class="num" style="color:${waitingClient ? 'var(--yellow)' : 'var(--text)'}">${waitingClient}</div><div class="label">Aguardando cliente</div></div>
     </div>
+
+    <div class="dash-split">
+      <div class="dash-panel">
+        <h2>Demandas por tipo</h2>
+        ${formatCounts.length ? `
+          <div class="format-bars">
+            ${formatCounts.map(([name, count]) => `
+              <div class="format-bar-row">
+                <span class="format-bar-label">${escapeHtml(name)}</span>
+                <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxFormatCount ? Math.round((count / maxFormatCount) * 100) : 0}%"></div></div>
+                <span class="format-bar-count">${count}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : '<div class="empty-state">Nenhuma demanda ativa com formato definido.</div>'}
+      </div>
+
+      <div class="dash-panel">
+        <h2>Termômetro de clientes</h2>
+        <p class="dash-panel-sub">Quem está mais encavalado e quem está em dia</p>
+        ${health.length ? `
+          <div class="health-list">
+            ${health.slice(0, 8).map((h) => {
+              const def = HEALTH_DEFS[h.status];
+              const metaParts = [];
+              if (h.overdue) metaParts.push(`${h.overdue} atrasada${h.overdue === 1 ? '' : 's'}`);
+              if (h.waiting) metaParts.push(`${h.waiting} aguardando cliente`);
+              metaParts.push(`${h.pipeline} no pipeline`);
+              return `
+                <div class="health-row" data-open="${h.client.id}">
+                  <span class="health-dot">${def.icon}</span>
+                  <div class="health-info">
+                    <div class="health-name">${escapeHtml(h.client.name)}</div>
+                    <div class="health-meta">${metaParts.join(' · ')}</div>
+                  </div>
+                  <span class="tag tag-${def.color}">${def.label}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        ` : '<div class="empty-state">Nenhum cliente com demandas ativas ainda.</div>'}
+      </div>
+    </div>
+
     <div class="page-header"><h1 style="font-size:16px">Últimas demandas</h1></div>
     <div class="card-list">
       ${recentDemands.length ? recentDemands.map((d) => {
@@ -392,6 +489,17 @@ function renderDashboard(main) {
   `;
   main.querySelectorAll('.client-card[data-open]').forEach((el) => {
     el.onclick = () => openDemandModal(state.demands.find((d) => d.id === el.dataset.open));
+  });
+  main.querySelectorAll('.health-row[data-open]').forEach((el) => {
+    el.onclick = async () => {
+      state.currentClientId = el.dataset.open;
+      state.currentPageId = null;
+      state.calendarCursor = null;
+      state.page = 'cliente-detail';
+      document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
+      state.pages = await api('/pages?client_id=' + state.currentClientId);
+      render();
+    };
   });
 }
 
@@ -490,7 +598,7 @@ function openClientModal(client) {
     <input type="email" id="f-contact-email" value="${escapeHtml(client.contact_email)}" style="width:100%" />
     <label>Notas</label>
     <textarea id="f-notes">${escapeHtml(client.notes)}</textarea>
-    ${!isEdit ? '<p style="color:var(--text-dim);font-size:12px;margin-top:10px">Assim que criado, o cliente já recebe a estrutura padrão: Calendário de Entrega, Planejamento e Brand Guide e Acessos.</p>' : ''}
+    ${!isEdit ? '<p style="color:var(--text-dim);font-size:12px;margin-top:10px">Assim que criado, o cliente já recebe a estrutura padrão: Calendário de Entrega, Planejamento, Brand Guide e Relatórios de Desempenho.</p>' : ''}
     <div class="modal-footer">
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
       <button class="btn" id="btn-save">Salvar</button>
@@ -552,32 +660,75 @@ function renderPageTreeNodes(nodes, depth) {
   }).join('');
 }
 
+function sectionIcon(title, type) {
+  if (title === 'Calendário de Entrega') return '📅';
+  if (title === 'Planejamento') return '🗓️';
+  if (title === 'Brand Guide') return '🎨';
+  if (title === 'Relatórios de Desempenho') return '📊';
+  return pageIcon({ type });
+}
+
 function renderClienteDetail(main) {
   const client = clientById(state.currentClientId);
   if (!client) {
     state.page = 'clientes';
     return renderClientes(main);
   }
-  const tree = buildPageTree(state.pages, null);
+
+  if (!state.currentPageId) {
+    return renderClientHub(main, client);
+  }
+
   const currentPage = state.pages.find((p) => p.id === state.currentPageId);
+  if (!currentPage) {
+    state.currentPageId = null;
+    return renderClientHub(main, client);
+  }
+
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="crumb">
+          <a href="#" id="crumb-clients">Clientes</a> <span>/</span>
+          <a href="#" id="crumb-hub">${escapeHtml(client.name)}</a> <span>/</span>
+          <span>${escapeHtml(currentPage.title)}</span>
+        </div>
+      </div>
+    </div>
+    <div class="page-editor" id="page-editor"></div>
+  `;
+
+  document.getElementById('crumb-clients').onclick = (e) => {
+    e.preventDefault();
+    state.page = 'clientes';
+    state.currentClientId = null;
+    state.currentPageId = null;
+    render();
+  };
+  document.getElementById('crumb-hub').onclick = (e) => {
+    e.preventDefault();
+    state.currentPageId = null;
+    renderClienteDetail(main);
+  };
+
+  renderPageEditor(currentPage);
+}
+
+// Hub do cliente: lugares clicáveis (não uma barra) — cada card leva pra uma página cheia sobre aquele assunto.
+function renderClientHub(main, client) {
+  const rootPages = state.pages
+    .filter((p) => p.client_id === client.id && !p.parent_id)
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
 
   main.innerHTML = `
     <div class="page-header">
       <div>
         <a href="#" id="back-to-clients" class="back-link">&larr; Voltar para Clientes</a>
         <h1 style="margin-top:8px"><span class="tag tag-${client.color || 'default'} tag-lg">${escapeHtml(client.name)}</span></h1>
-        <p>Workspace do cliente — páginas, calendário, planejamento e acessos</p>
+        <p>Escolha uma seção para abrir</p>
       </div>
     </div>
-    <div class="client-workspace">
-      <div class="ptree-panel">
-        <button class="btn secondary small" id="btn-new-root-page" style="width:100%;margin-bottom:10px">+ Nova página</button>
-        <div class="ptree-list" id="ptree-list">
-          ${tree.length ? renderPageTreeNodes(tree, 0) : '<div class="empty-state" style="padding:16px">Nenhuma página ainda.</div>'}
-        </div>
-      </div>
-      <div class="page-editor" id="page-editor"></div>
-    </div>
+    <div class="section-grid" id="section-grid"></div>
   `;
 
   document.getElementById('back-to-clients').onclick = (e) => {
@@ -587,34 +738,43 @@ function renderClienteDetail(main) {
     render();
   };
 
-  document.getElementById('btn-new-root-page').onclick = () => quickCreatePage(null);
+  const grid = document.getElementById('section-grid');
+  grid.innerHTML = rootPages.map((p) => {
+    const children = state.pages.filter((c) => c.parent_id === p.id);
+    let meta;
+    if (p.type === 'calendar') {
+      const withDate = state.demands.filter((d) => d.client_id === client.id && (d.prazo_final || d.prazo_designer)).length;
+      meta = `${withDate} demanda${withDate === 1 ? '' : 's'} com prazo`;
+    } else if (children.length) {
+      meta = `${children.length} subpágina${children.length === 1 ? '' : 's'}`;
+    } else if (p.content && p.content.trim()) {
+      meta = `Atualizado em ${formatDateBR((p.updated_at || '').slice(0, 10)) || 'recentemente'}`;
+    } else {
+      meta = 'Vazio — clique para começar';
+    }
+    return `
+      <div class="section-tile" data-open="${p.id}">
+        <div class="section-icon">${sectionIcon(p.title, p.type)}</div>
+        <div class="section-name">${escapeHtml(p.title)}</div>
+        <div class="section-meta">${meta}</div>
+      </div>
+    `;
+  }).join('') + `
+    <div class="section-tile add" id="add-section-tile">
+      <div class="section-icon">+</div>
+      <div class="section-name">Nova seção</div>
+      <div class="section-meta">Criar página adicional</div>
+    </div>
+  `;
 
-  document.querySelectorAll('.ptree-toggle').forEach((el) => {
-    el.onclick = (e) => {
-      e.stopPropagation();
-      const id = el.dataset.toggle;
-      if (state.expandedFolders.has(id)) state.expandedFolders.delete(id);
-      else state.expandedFolders.add(id);
-      renderClienteDetail(main);
-    };
-  });
-  document.querySelectorAll('.ptree-add').forEach((el) => {
-    el.onclick = (e) => {
-      e.stopPropagation();
-      quickCreatePage(el.dataset.addchild);
-    };
-  });
-  document.querySelectorAll('.page-tree-item').forEach((el) => {
+  grid.querySelectorAll('.section-tile[data-open]').forEach((el) => {
     el.onclick = () => {
-      const id = el.dataset.id;
-      state.currentPageId = id;
+      state.currentPageId = el.dataset.open;
       state.calendarCursor = null;
-      state.expandedFolders.add(id);
       renderClienteDetail(main);
     };
   });
-
-  renderPageEditor(currentPage);
+  document.getElementById('add-section-tile').onclick = () => quickCreatePage(null);
 }
 
 // Cria a página direto (sem popup) e abre com o título pronto para reescrever.
@@ -1140,7 +1300,7 @@ function renderDemandas(main) {
 }
 
 function renderKanban(root, filtered) {
-  root.innerHTML = `<div class="kanban" id="kanban"></div>`;
+  root.innerHTML = `<div class="kanban" id="kanban"></div><div class="board-footer" id="kanban-footer"></div>`;
   const kanban = document.getElementById('kanban');
   kanban.innerHTML = KANBAN_STAGES.map((stage) => {
     const cols = STATUS_DEFS.filter((s) => s.stage === stage.key);
@@ -1162,9 +1322,11 @@ function renderKanban(root, filtered) {
                   <span class="col-dot tag-${col.color}" style="background:currentColor"></span>
                   <h3>${col.label}</h3>
                   <span class="count">${items.length}</span>
+                  <button class="col-add-btn" data-add="${col.key}" title="Nova demanda nesta coluna">+</button>
                 </div>
                 <div class="col-body" data-status="${col.key}">
                   ${items.map((d) => renderDemandCard(d)).join('')}
+                  <button class="col-add-footer" data-add="${col.key}">+ Adicionar demanda</button>
                 </div>
               </div>
             `;
@@ -1174,6 +1336,8 @@ function renderKanban(root, filtered) {
       </div>
     `;
   }).join('');
+
+  document.getElementById('kanban-footer').innerHTML = `${filtered.length} demanda${filtered.length === 1 ? '' : 's'} no total`;
 
   kanban.querySelectorAll('.stage-label').forEach((el) => {
     el.onclick = () => {
@@ -1185,6 +1349,13 @@ function renderKanban(root, filtered) {
   });
 
   wireDemandCardEvents(kanban);
+
+  kanban.querySelectorAll('[data-add]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      openDemandModal(null, el.dataset.add);
+    };
+  });
 
   kanban.querySelectorAll('.col-body').forEach((col) => {
     col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drag-over'); });
@@ -1353,6 +1524,9 @@ function renderDemandTable(root, filtered) {
             `;
           }).join('') : `<tr><td colspan="12"><div class="empty-state">Nenhuma demanda encontrada com esses filtros.</div></td></tr>`}
         </tbody>
+        <tfoot>
+          <tr class="table-count-row"><td colspan="12">${sorted.length} demanda${sorted.length === 1 ? '' : 's'} no total</td></tr>
+        </tfoot>
       </table>
     </div>
   `;
@@ -1503,8 +1677,8 @@ function renderBulkBar(slot) {
 }
 
 // Modal de demanda: criação rápida (mínima) -> depois autosave campo a campo, sem botão "Salvar".
-function openDemandModal(demand) {
-  if (!demand) return openQuickCreateDemand();
+function openDemandModal(demand, defaultStatus) {
+  if (!demand) return openQuickCreateDemand(defaultStatus);
 
   const teamOptions = activeTeamNames();
   if (demand.responsible && !teamOptions.includes(demand.responsible)) teamOptions.push(demand.responsible);
@@ -1668,8 +1842,9 @@ function openDemandModal(demand) {
   };
 }
 
-function openQuickCreateDemand() {
+function openQuickCreateDemand(defaultStatus) {
   if (!state.clients.length) { toast('Cadastre um cliente antes de criar demandas.', 'warn'); return; }
+  const statusDefault = defaultStatus || 'em_briefing';
   showModal(`
     <h2>Nova demanda</h2>
     <label>Projeto / Cliente</label>
@@ -1692,7 +1867,7 @@ function openQuickCreateDemand() {
       client_id: document.getElementById('qc-client').value,
       title,
       format: [], platform: [],
-      status: 'em_briefing',
+      status: statusDefault,
       needs_capture: true,
       priority: 'normal',
       forecast: 'prevista',
@@ -1753,6 +1928,23 @@ function renderNotificacoes(main) {
     automationHtml,
   ].join('');
 
+  let weeklyHtml = '';
+  if (n.weeklySummary) {
+    const rows = n.weeklySummary.days.map((g) => `
+      <div class="weekly-day-group">
+        <div class="weekly-day-label">${formatDateBR(g.dateStr)}</div>
+        ${g.items.map((d) => notifRow('📌', d.title, `${escapeHtml(clientName(d.client_id))} · ${escapeHtml(statusDef(d.status).label)}`, d)).join('')}
+      </div>
+    `).join('');
+    weeklyHtml = `
+      <div class="notif-section weekly-summary">
+        <div class="notif-section-title blue">🗓️ Resumo da semana <span class="count">${n.weeklySummary.total}</span></div>
+        <p class="dash-panel-sub" style="margin:2px 0 10px">Tudo que vence entre hoje e domingo, gerado automaticamente toda segunda-feira.</p>
+        <div class="notif-list">${rows}</div>
+      </div>
+    `;
+  }
+
   main.innerHTML = `
     <div class="page-header">
       <div>
@@ -1760,7 +1952,8 @@ function renderNotificacoes(main) {
         <p>Tudo que precisa da sua atenção agora, num só lugar</p>
       </div>
     </div>
-    ${sections || '<div class="empty-state">Tudo em dia — nenhuma pendência no momento. 🎉</div>'}
+    ${weeklyHtml}
+    ${sections || (!weeklyHtml ? '<div class="empty-state">Tudo em dia — nenhuma pendência no momento. 🎉</div>' : '')}
   `;
 
   main.querySelectorAll('.notif-row').forEach((row) => {
@@ -1815,6 +2008,20 @@ function renderAutomationRules(root) {
     return;
   }
   list.innerHTML = state.automations.map((a) => {
+    if (a.kind === 'weekly_summary') {
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">🗓️ <span class="tag tag-blue">Resumo semanal</span></div>
+            <div class="meta">Toda segunda-feira, reúne na Central de Notificações tudo que vence na semana</div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
     if (a.kind === 'deadline') {
       const fieldLabel = DEADLINE_FIELD_LABELS[a.trigger.field] || a.trigger.field;
       const daysLabel = DEADLINE_DAYS_LABELS[Number(a.trigger.daysBefore)] || `${a.trigger.daysBefore} dias antes`;
@@ -1887,6 +2094,7 @@ function openAutomationModal() {
     <select id="auto-kind" style="width:100%">
       <option value="field">Regra de campo (quando X, definir Y)</option>
       <option value="deadline">Alerta de prazo (avisar antes de vencer)</option>
+      <option value="weekly_summary">Resumo semanal (toda segunda-feira)</option>
     </select>
     <div id="auto-form-field">
       <label style="margin-top:14px">Quando</label>
@@ -1913,6 +2121,9 @@ function openAutomationModal() {
       </select>
       <p style="color:var(--text-dim);font-size:12px;margin-top:10px">O alerta aparece na Central de Notificações assim que a data se aproximar — não precisa reabrir a demanda.</p>
     </div>
+    <div id="auto-form-weekly" class="hidden">
+      <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Toda segunda-feira, a Central de Notificações mostra um resumo com tudo que vence naquela semana, agrupado por dia. Não requer configuração adicional.</p>
+    </div>
     <div class="modal-footer">
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
       <button class="btn" id="btn-save">Criar automação</button>
@@ -1930,9 +2141,10 @@ function openAutomationModal() {
   document.getElementById('auto-action-field').onchange = () => refillValue('auto-action-field', 'auto-action-value');
 
   document.getElementById('auto-kind').onchange = (e) => {
-    const isDeadline = e.target.value === 'deadline';
-    document.getElementById('auto-form-field').classList.toggle('hidden', isDeadline);
-    document.getElementById('auto-form-deadline').classList.toggle('hidden', !isDeadline);
+    const kind = e.target.value;
+    document.getElementById('auto-form-field').classList.toggle('hidden', kind !== 'field');
+    document.getElementById('auto-form-deadline').classList.toggle('hidden', kind !== 'deadline');
+    document.getElementById('auto-form-weekly').classList.toggle('hidden', kind !== 'weekly_summary');
   };
 
   document.getElementById('btn-cancel').onclick = closeModal;
@@ -1946,6 +2158,8 @@ function openAutomationModal() {
         trigger: { field: document.getElementById('auto-deadline-field').value, daysBefore: Number(document.getElementById('auto-deadline-days').value) },
         action: {},
       };
+    } else if (kind === 'weekly_summary') {
+      payload = { kind: 'weekly_summary', active: true, trigger: {}, action: {} };
     } else {
       const triggerField = document.getElementById('auto-trigger-field').value;
       const actionField = document.getElementById('auto-action-field').value;

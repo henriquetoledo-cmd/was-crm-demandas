@@ -176,6 +176,18 @@ a { color: var(--blue); text-decoration: none; }
 }
 .dash-panel h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
 .dash-panel-sub { color: var(--text-dim); font-size: 12px; margin: 0 0 14px; }
+.dash-panel-wide { padding-bottom: 22px; }
+.dash-subgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-soft);
+}
+@media (max-width: 900px) { .dash-subgrid { grid-template-columns: 1fr; } }
+.dash-subpanel h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; color: var(--text); }
+.dash-subpanel .dash-panel-sub { margin-bottom: 10px; }
 .format-bars { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
 .format-bar-row { display: grid; grid-template-columns: 110px 1fr 26px; align-items: center; gap: 10px; }
 .format-bar-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -195,15 +207,10 @@ a { color: var(--blue); text-decoration: none; }
 .health-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .health-list-scroll { max-height: 420px; overflow-y: auto; padding-right: 4px; }
 
-.vc-list { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
-.vc-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
-}
-.vc-info { min-width: 0; }
-.vc-name { font-size: 13.5px; font-weight: 600; }
-.vc-url { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; word-break: break-all; }
-.vc-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.vc-tile { cursor: default; }
+.vc-tile:hover { transform: none; }
+.vc-url { font-size: 11px; color: var(--text-dim); word-break: break-all; line-height: 1.4; }
+.vc-tile .vc-actions { opacity: 1; transform: none; position: static; display: flex; gap: 8px; margin-top: 2px; }
 
 
 .dash-filters { display: flex; gap: 10px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
@@ -1240,6 +1247,8 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .capture-toggle { display: flex; align-items: center; gap: 2px; cursor: pointer; font-size: 11px; }
 .capture-toggle input { width: auto; margin: 0; }
 .cell-capture-date { width: 120px; }
+.cell-capture-link { color: var(--c-purple); text-decoration: none; font-size: 13px; flex-shrink: 0; }
+.cell-capture-link:hover { filter: brightness(1.3); }
 
 /* ---- Tabela estilo Excel: seleção de células, colunas reordenáveis/customizadas ---- */
 .table-hint { color: var(--text-dim); font-size: 11px; margin: 0 0 8px; }

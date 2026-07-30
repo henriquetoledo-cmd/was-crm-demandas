@@ -315,23 +315,28 @@ function render() {
 
 function renderVisaoCliente(main) {
   const origin = window.location.origin;
+  const clients = state.clients.filter((c) => c.status === 'ativo');
   main.innerHTML = `
     <div class="page-header">
       <div>
         <h1>Visão Cliente</h1>
-        <p>Link público e individual de cada cliente — compartilhe pra ele acompanhar as entregas sem precisar de login</p>
+        <p>Link público e individual de cada cliente — cada um só vê as próprias demandas, nunca as de outro cliente</p>
       </div>
     </div>
-    <div class="vc-list">
-      ${state.clients.filter((c) => c.status === 'ativo').map((c) => {
+    <div class="clients-grid" id="vc-grid">
+      ${clients.map((c) => {
         const url = origin + '/portal?slug=' + encodeURIComponent(c.portal_slug || '');
+        const activeDemands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado').length;
         return `
-          <div class="vc-row">
-            <div class="vc-info">
-              <div class="vc-name">${escapeHtml(c.name)}</div>
-              <div class="vc-url">${escapeHtml(url)}</div>
+          <div class="client-tile vc-tile">
+            <div class="ct-top">
+              <div class="ct-avatar tag-${c.color || 'default'}">${initials(c.name)}</div>
+              <span class="badge ${c.status}">${c.status}</span>
             </div>
-            <div class="vc-actions">
+            <div class="ct-name">${escapeHtml(c.name)}</div>
+            <div class="ct-meta">${activeDemands} demanda${activeDemands === 1 ? '' : 's'} ativa${activeDemands === 1 ? '' : 's'}</div>
+            <div class="vc-url" title="${escapeHtml(url)}">${escapeHtml(url)}</div>
+            <div class="ct-actions vc-actions">
               <button class="btn secondary small vc-copy" data-url="${escapeHtml(url)}">Copiar link</button>
               <a class="btn small" href="${escapeHtml(url)}" target="_blank" rel="noopener">Abrir</a>
             </div>
@@ -341,11 +346,12 @@ function renderVisaoCliente(main) {
     </div>
   `;
   main.querySelectorAll('.vc-copy').forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
       try {
         await navigator.clipboard.writeText(btn.dataset.url);
         toast('Link copiado.', 'success');
-      } catch (e) {
+      } catch (err) {
         toast('Não foi possível copiar — copie manualmente.', 'error');
       }
     };
@@ -550,6 +556,23 @@ function computeMonthlyDeliveries(demandsForMetric) {
   });
 }
 
+function computeStatusPendingCounts(pipeline) {
+  const counts = {};
+  pipeline.forEach((d) => { counts[d.status] = (counts[d.status] || 0) + 1; });
+  return Object.entries(counts)
+    .map(([key, count]) => ({ key, label: statusDef(key).label, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function computeDeliveredFormatCounts(demandsForMetric) {
+  const counts = {};
+  demandsForMetric.forEach((d) => {
+    if (!DELIVERED_STATUSES.includes(d.status)) return;
+    (d.format || []).forEach((fm) => { counts[fm] = (counts[fm] || 0) + 1; });
+  });
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+}
+
 function computeWorkload(demandsForWorkload) {
   const byName = {};
   demandsForWorkload.forEach((d) => {
@@ -593,6 +616,10 @@ function renderDashboard(main) {
   const health = computeClientHealth();
   const monthly = computeMonthlyDeliveries(scoped);
   const maxMonthly = monthly.length ? Math.max(...monthly.map((m) => m.count)) : 0;
+  const statusPending = computeStatusPendingCounts(pipeline);
+  const maxStatusPending = statusPending.length ? statusPending[0].count : 0;
+  const deliveredFormatCounts = computeDeliveredFormatCounts(scoped);
+  const maxDeliveredFormat = deliveredFormatCounts.length ? deliveredFormatCounts[0][1] : 0;
 
   main.innerHTML = `
     <div class="page-header">
@@ -624,9 +651,9 @@ function renderDashboard(main) {
       <div class="stat-card"><div class="num">${readyToPost}</div><div class="label">Prontas p/ postar</div></div>
     </div>
 
-    <div class="dash-panel" style="margin-bottom:20px">
-      <h2>Entregas por mês</h2>
-      <p class="dash-panel-sub">Demandas que chegaram a postar/programado/postado, por mês do prazo final</p>
+    <div class="dash-panel dash-panel-wide" style="margin-bottom:20px">
+      <h2>Entregas do mês</h2>
+      <p class="dash-panel-sub">Visão completa: histórico de entregas, o que ainda está pendente e por formato</p>
       ${monthly.length ? `
         <div class="format-bars">
           ${monthly.map((m) => `
@@ -638,6 +665,40 @@ function renderDashboard(main) {
           `).join('')}
         </div>
       ` : '<div class="empty-state">Nenhuma entrega com prazo definido ainda.</div>'}
+
+      <div class="dash-subgrid">
+        <div class="dash-subpanel">
+          <h3>Status pendentes</h3>
+          <p class="dash-panel-sub">Tudo que ainda não foi entregue, por etapa atual</p>
+          ${statusPending.length ? `
+            <div class="format-bars">
+              ${statusPending.map((s) => `
+                <div class="format-bar-row">
+                  <span class="format-bar-label">${escapeHtml(s.label)}</span>
+                  <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxStatusPending ? Math.round((s.count / maxStatusPending) * 100) : 0}%"></div></div>
+                  <span class="format-bar-count">${s.count}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : '<div class="empty-state">Nada pendente — tudo entregue.</div>'}
+        </div>
+
+        <div class="dash-subpanel">
+          <h3>Entregas por formato</h3>
+          <p class="dash-panel-sub">O que já foi (ou está pronto pra ser) postado, por formato</p>
+          ${deliveredFormatCounts.length ? `
+            <div class="format-bars">
+              ${deliveredFormatCounts.map(([name, count]) => `
+                <div class="format-bar-row">
+                  <span class="format-bar-label">${escapeHtml(name)}</span>
+                  <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxDeliveredFormat ? Math.round((count / maxDeliveredFormat) * 100) : 0}%"></div></div>
+                  <span class="format-bar-count">${count}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : '<div class="empty-state">Nenhuma entrega com formato definido ainda.</div>'}
+        </div>
+      </div>
     </div>
 
     <div class="dash-split">
@@ -1754,7 +1815,7 @@ function renderDemandCard(d) {
     <div class="demand-card ${urg}" data-id="${d.id}" draggable="true">
       <input type="text" class="title card-title-input" data-id="${d.id}" value="${escapeHtml(d.title)}" />
       ${tags ? `<div class="tag-group">${tags}</div>` : ''}
-      <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}</div>
+      <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}${d.capture_link ? `<a href="${escapeHtml(d.capture_link)}" target="_blank" rel="noopener" class="tag tag-purple" onclick="event.stopPropagation()">🔗 material</a>` : ''}</div>
       <div class="sub">
         <span><span class="priority-dot ${d.priority}"></span>${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</span>
         <span class="${urg ? urg + '-text' : ''}">${formatDateBR(d.prazo_final) || formatDateBR(d.prazo_designer) || ''}</span>
@@ -2232,6 +2293,7 @@ function renderTableCell(colId, d, rowIndex, teamNames) {
     return `<td class="cell-capture">
       <label class="capture-toggle"><input type="checkbox" class="cell-capture-toggle" data-id="${d.id}" ${d.needs_capture !== false ? 'checked' : ''} /> 🎬</label>
       ${d.needs_capture !== false ? `<input type="date" class="cell-input cell-capture-date" data-id="${d.id}" value="${d.capture_date || ''}" />` : ''}
+      ${d.capture_link ? `<a href="${escapeHtml(d.capture_link)}" target="_blank" rel="noopener" class="cell-capture-link" title="Abrir material de captação">🔗</a>` : ''}
     </td>`;
   }
   const val = (d.custom_fields && d.custom_fields[colId]) || '';
@@ -2676,6 +2738,7 @@ function openDemandModal(demand, defaultStatus) {
       </label>
       <div id="capture-date-wrap" style="${demand.needs_capture === false ? 'display:none' : ''};margin-top:8px">
         <input type="date" id="f-capture-date" value="${demand.capture_date || ''}" />
+        <input type="text" id="f-capture-link" placeholder="Link do material de captação (drive, etc.)" value="${escapeHtml(demand.capture_link || '')}" style="width:100%;margin-top:8px" />
       </div>
       <div class="two-col" style="margin-top:12px">
         <div>
@@ -2715,10 +2778,6 @@ function openDemandModal(demand, defaultStatus) {
       <textarea id="f-desc" style="min-height:44px">${escapeHtml(demand.description)}</textarea>
       <label>Link (arquivo, drive, etc.)</label>
       <input type="text" id="f-link" value="${escapeHtml(demand.link)}" style="width:100%" />
-      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
-        <input type="checkbox" id="f-visible" ${demand.visible_to_client ? 'checked' : ''} style="width:auto" />
-        Visível no portal do cliente
-      </label>
     </details>
 
     <details class="field-details" open>
@@ -2775,7 +2834,7 @@ function openDemandModal(demand, defaultStatus) {
   document.getElementById('f-refacao').onchange = (e) => patch({ refacao: e.target.value });
   document.getElementById('f-resp').onchange = (e) => patch({ responsible: e.target.value });
   document.getElementById('f-link').addEventListener('input', (e) => patchDebounced({ link: e.target.value.trim() }));
-  document.getElementById('f-visible').onchange = (e) => patch({ visible_to_client: e.target.checked });
+  document.getElementById('f-capture-link').addEventListener('input', (e) => patchDebounced({ capture_link: e.target.value.trim() }));
   document.getElementById('f-prazo-designer').onchange = (e) => patch({ prazo_designer: e.target.value });
   document.getElementById('f-prazo-final').onchange = (e) => patch({ prazo_final: e.target.value });
   document.getElementById('f-needs-capture').onchange = (e) => {

@@ -85,12 +85,25 @@ async function init() {
               <div class="portal-group-label">${label} <span class="tag tag-default">${items.length}</span></div>
               <div class="card-list">
                 ${items.map((d) => `
-                  <div class="client-card">
-                    <div>
-                      <div class="name">${escapeHtml(d.title)}</div>
-                      <div class="meta">${(d.format || []).join(', ')}${d.description ? ' · ' + escapeHtml(d.description) : ''}${d.prazo_final ? ' · prazo: ' + formatDateBR(d.prazo_final) : ''}</div>
+                  <div class="client-card" style="flex-direction:column;align-items:stretch;gap:8px">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+                      <div>
+                        <div class="name">${escapeHtml(d.title)}</div>
+                        <div class="meta">${(d.format || []).join(', ')}${d.prazo_final ? ' · prazo: ' + formatDateBR(d.prazo_final) : ''}</div>
+                      </div>
+                      ${d.link ? `<a href="${escapeHtml(d.link)}" target="_blank" class="btn small secondary">Abrir</a>` : ''}
                     </div>
-                    ${d.link ? `<a href="${escapeHtml(d.link)}" target="_blank" class="btn small secondary">Abrir</a>` : ''}
+                    ${d.briefing ? `<div class="portal-briefing"><strong>Briefing:</strong> ${escapeHtml(d.briefing)}</div>` : ''}
+                    ${(d.comments || []).length ? `
+                      <div class="portal-comments">
+                        ${d.comments.map((c) => `
+                          <div class="portal-comment">
+                            <span class="portal-comment-author">${escapeHtml(c.author)}:</span>
+                            <span>${escapeHtml(c.text)}</span>
+                          </div>
+                        `).join('')}
+                      </div>
+                    ` : ''}
                   </div>
                 `).join('')}
               </div>

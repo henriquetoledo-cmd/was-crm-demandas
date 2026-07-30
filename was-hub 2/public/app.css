@@ -110,7 +110,7 @@ a { color: var(--blue); text-decoration: none; }
 .nav-item:hover { background: var(--panel-2); color: var(--text); }
 .nav-item.active { background: linear-gradient(135deg, var(--blue), var(--blue-dim)); color: white; box-shadow: 0 4px 14px -4px rgba(59,130,246,.6); }
 
-.main { flex: 1; padding: 30px 40px; overflow-y: auto; overflow-x: hidden; }
+.main { flex: 1; min-width: 0; padding: 30px 40px; overflow-y: auto; overflow-x: hidden; }
 
 .page-header {
   display: flex;
@@ -194,6 +194,17 @@ a { color: var(--blue); text-decoration: none; }
 .health-name { font-size: 13px; font-weight: 600; }
 .health-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .health-list-scroll { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+
+.vc-list { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
+.vc-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+}
+.vc-info { min-width: 0; }
+.vc-name { font-size: 13.5px; font-weight: 600; }
+.vc-url { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; word-break: break-all; }
+.vc-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
 
 .dash-filters { display: flex; gap: 10px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
 .dash-filters select {
@@ -644,6 +655,10 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .portal-header h1 { margin: 0; font-size: 26px; letter-spacing: -.01em; }
 .portal-header p { color: var(--text-dim); margin: 6px 0 0; font-size: 13px; }
 .portal-body { padding: 34px 44px; max-width: 920px; margin: 0 auto; }
+.portal-briefing { font-size: 12.5px; color: var(--text-dim); background: var(--panel-2); border-radius: 8px; padding: 8px 10px; line-height: 1.5; }
+.portal-comments { display: flex; flex-direction: column; gap: 6px; }
+.portal-comment { font-size: 12.5px; background: var(--panel-2); border-radius: 8px; padding: 7px 10px; line-height: 1.45; }
+.portal-comment-author { font-weight: 700; margin-right: 4px; }
 .portal-section { margin-bottom: 34px; }
 .portal-section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); margin-bottom: 14px; font-weight: 700; }
 .portal-group-label { font-size: 12px; font-weight: 700; color: var(--text-dim); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
@@ -1035,9 +1050,14 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: visible;
+  max-width: 100%;
   box-shadow: var(--shadow-1);
 }
+.table-wrap::-webkit-scrollbar { height: 10px; }
+.table-wrap::-webkit-scrollbar-thumb { background: var(--panel-3); border-radius: 100px; }
+.table-wrap::-webkit-scrollbar-track { background: transparent; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th {
   text-align: left;
@@ -1099,7 +1119,10 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .notif-section-title.orange { color: var(--c-orange); }
 .notif-section-title.yellow { color: var(--yellow); }
 .notif-section-title.blue { color: var(--blue); }
+.notif-section-title.purple { color: #a78bfa; }
+.notif-section-title.pink { color: #f472b6; }
 .notif-section-title .count { background: var(--panel-2); color: var(--text-dim); font-size: 10px; padding: 1px 7px; border-radius: 100px; }
+.notif-row.notif-unread { background: rgba(244,114,182,.08); border-left: 2px solid #f472b6; }
 .notif-list { display: flex; flex-direction: column; gap: 6px; }
 .weekly-summary {
   background: linear-gradient(160deg, var(--panel-2), var(--panel));
@@ -1258,6 +1281,36 @@ td[data-row][data-col].cell-selected {
   max-height: 260px;
   overflow-y: auto;
 }
+.inline-popover-add { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
+.inline-popover-add-input {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; font-family: inherit;
+}
+.inline-popover-add-input:focus { outline: none; border-color: var(--blue); }
+
+/* ---- Comentários ---- */
+.comments-list { display: flex; flex-direction: column; gap: 10px; max-height: 260px; overflow-y: auto; margin-bottom: 12px; }
+.comment-row { display: flex; gap: 9px; align-items: flex-start; }
+.comment-avatar {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--panel-3); color: var(--text);
+  display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0;
+}
+.comment-body { flex: 1; min-width: 0; background: var(--panel-2); border-radius: 10px; padding: 8px 10px; }
+.comment-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.comment-author { font-size: 12.5px; font-weight: 700; }
+.comment-time { font-size: 10.5px; color: var(--text-faint); }
+.comment-text { font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.mention-chip { color: var(--blue); font-weight: 600; }
+.comment-composer { position: relative; }
+.comment-composer textarea { width: 100%; min-height: 56px; }
+.mention-suggest {
+  position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-2); max-height: 160px;
+  overflow-y: auto; z-index: 50;
+}
+.mention-suggest-item { padding: 7px 10px; font-size: 12.5px; cursor: pointer; }
+.mention-suggest-item:hover { background: var(--panel-2); }
+
 
 /* ---- Barra de edição em massa ---- */
 .bulk-bar {

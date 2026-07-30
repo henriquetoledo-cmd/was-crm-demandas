@@ -10,30 +10,34 @@
   <div id="content">
     <div class="portal-body"><p style="color:var(--text-dim)">Carregando...</p></div>
   </div>
+  <div id="modal-root"></div>
 
 <script>
-const STATUS_LABELS = {
-  em_briefing: 'Em briefing',
-  aprovacao_briefing: 'Aguardando aprovação do briefing',
-  aguardando_infos: 'Aguardando infos/materiais',
-  aguardando_captacao: 'Aguardando captação',
-  a_fazer_design: 'A fazer - Design',
-  em_criacao_design: 'Em criação (design)',
-  em_ajuste_design: 'Em ajuste (design)',
-  pronto_envio_design: 'Pronto para envio (design)',
-  em_aprovacao_cliente: 'Aguardando sua aprovação',
-  freela: 'Freela',
-  aprovado: 'Aprovado',
-  postar: 'Postar',
-  programado: 'Programado',
-  postado: 'Postado',
-  stand_by: 'Stand By',
-};
+const STATUS_DEFS = [
+  { key: 'em_briefing', label: 'Em briefing', color: 'yellow' },
+  { key: 'aprovacao_briefing', label: 'Aprovação do briefing', color: 'green' },
+  { key: 'aguardando_captacao', label: 'Aguardando captação', color: 'red' },
+  { key: 'a_fazer_design', label: 'A fazer - Design', color: 'brown' },
+  { key: 'em_criacao_design', label: 'Em criação (design)', color: 'yellow' },
+  { key: 'em_ajuste_design', label: 'Em ajuste (design)', color: 'orange' },
+  { key: 'pronto_envio_design', label: 'Pronto para envio (design)', color: 'pink' },
+  { key: 'em_aprovacao_cliente', label: 'Aguardando sua aprovação', color: 'green' },
+  { key: 'aprovado', label: 'Aprovado', color: 'green' },
+  { key: 'postar', label: 'Postar', color: 'blue' },
+  { key: 'programado', label: 'Programado', color: 'purple' },
+  { key: 'postado', label: 'Postado', color: 'purple' },
+  { key: 'aguardando_infos', label: 'Aguardando infos/materiais', color: 'gray' },
+  { key: 'freela', label: 'Freela', color: 'gray' },
+  { key: 'stand_by', label: 'Stand By', color: 'gray' },
+  { key: 'arquivado', label: 'Arquivado', color: 'default' },
+];
+const WEEKDAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+const MONTH_LABELS = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 
+function statusDef(key) { return STATUS_DEFS.find((s) => s.key === key) || STATUS_DEFS[0]; }
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-
 function formatDateBR(iso) {
   if (!iso) return '';
   const parts = iso.split('-');
@@ -41,10 +45,36 @@ function formatDateBR(iso) {
   const [y, m, d] = parts;
   return `${d}/${m}/${y}`;
 }
+function formatDateTimeBR(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function initials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function sectionIcon(title, type) {
+  if (title === 'Calendário de Entrega') return '📅';
+  if (title === 'Planejamento') return '🗓️';
+  if (title === 'Brand Guide') return '🎨';
+  if (title === 'Relatórios de Desempenho') return '📊';
+  return type === 'calendar' ? '📅' : '📄';
+}
+
+let slug = null;
+let portalData = null; // { client, demands, pages }
+let view = { type: 'hub' };
+let calCursor = null;
 
 async function init() {
   const params = new URLSearchParams(location.search);
-  const slug = params.get('slug');
+  slug = params.get('slug');
   const content = document.getElementById('content');
 
   if (!slug) {
@@ -52,81 +82,263 @@ async function init() {
     return;
   }
 
-  let data;
   try {
     const res = await fetch('/api/portal/' + encodeURIComponent(slug));
     if (!res.ok) throw new Error();
-    data = await res.json();
+    portalData = await res.json();
   } catch (e) {
     content.innerHTML = '<div class="portal-body"><p>Cliente não encontrado. Verifique o link.</p></div>';
     return;
   }
 
-  const { client, demands, strategies } = data;
+  render();
+}
 
-  const grouped = {};
-  Object.keys(STATUS_LABELS).forEach((k) => (grouped[k] = []));
-  demands.forEach((d) => grouped[d.status]?.push(d));
-
+function render() {
+  const content = document.getElementById('content');
+  const { client } = portalData;
   content.innerHTML = `
     <div class="portal-header">
       <div class="portal-brand">We Are Sinergy</div>
       <h1>${escapeHtml(client.name)}</h1>
       <p>Acompanhamento de entregas em tempo real</p>
     </div>
-    <div class="portal-body">
-      <div class="portal-section">
-        <h2>Status das entregas</h2>
-        ${demands.length ? Object.entries(STATUS_LABELS).map(([key, label]) => {
-          const items = grouped[key];
-          if (!items.length) return '';
-          return `
-            <div style="margin-bottom:20px">
-              <div class="portal-group-label">${label} <span class="tag tag-default">${items.length}</span></div>
-              <div class="card-list">
-                ${items.map((d) => `
-                  <div class="client-card" style="flex-direction:column;align-items:stretch;gap:8px">
-                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-                      <div>
-                        <div class="name">${escapeHtml(d.title)}</div>
-                        <div class="meta">${(d.format || []).join(', ')}${d.prazo_final ? ' · prazo: ' + formatDateBR(d.prazo_final) : ''}</div>
-                      </div>
-                      ${d.link ? `<a href="${escapeHtml(d.link)}" target="_blank" class="btn small secondary">Abrir</a>` : ''}
-                    </div>
-                    ${d.briefing ? `<div class="portal-briefing"><strong>Briefing:</strong> ${escapeHtml(d.briefing)}</div>` : ''}
-                    ${(d.comments || []).length ? `
-                      <div class="portal-comments">
-                        ${d.comments.map((c) => `
-                          <div class="portal-comment">
-                            <span class="portal-comment-author">${escapeHtml(c.author)}:</span>
-                            <span>${escapeHtml(c.text)}</span>
-                          </div>
-                        `).join('')}
-                      </div>
-                    ` : ''}
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          `;
-        }).join('') : '<div class="empty-state">Nenhuma entrega compartilhada ainda.</div>'}
-      </div>
+    <div class="portal-body" id="portal-view"></div>
+    <div class="portal-footer">Powered by WAS — We Are Sinergy</div>
+  `;
+  const el = document.getElementById('portal-view');
+  if (view.type === 'hub') renderHub(el);
+  else if (view.type === 'calendar') renderCalendarSection(el);
+  else if (view.type === 'page') renderPageSection(el, view.pageId);
+}
 
-      ${strategies.length ? `
-        <div class="portal-section">
-          <h2>Estratégia</h2>
-          ${strategies.map((s) => `
-            <div class="strategy-doc">
-              <h3>${escapeHtml(s.title)}</h3>
-              <div class="meta">${s.period ? escapeHtml(s.period) : ''}</div>
-              <div class="content">${escapeHtml(s.content)}</div>
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
-      <div class="portal-footer">Powered by WAS — We Are Sinergy</div>
+// ---------- Hub: mesmo grid de seções da página interna de Clientes ----------
+function renderHub(el) {
+  const { demands, pages } = portalData;
+  const withDate = demands.filter((d) => d.prazo_final || d.prazo_designer).length;
+
+  el.innerHTML = `
+    <div class="section-grid">
+      <div class="section-tile" data-open="calendar">
+        <div class="section-icon">📅</div>
+        <div class="section-name">Calendário de Entrega</div>
+        <div class="section-meta">${withDate} demanda${withDate === 1 ? '' : 's'} com prazo</div>
+      </div>
+      ${pages.filter((p) => p.type !== 'calendar').map((p) => {
+        const hasContent = p.content && p.content.replace(/<[^>]*>/g, '').trim();
+        return `
+          <div class="section-tile" data-open="page:${p.id}">
+            <div class="section-icon">${sectionIcon(p.title, p.type)}</div>
+            <div class="section-name">${escapeHtml(p.title)}</div>
+            <div class="section-meta">${hasContent ? 'Conteúdo disponível' : 'Ainda sem conteúdo'}</div>
+          </div>
+        `;
+      }).join('')}
     </div>
   `;
+  el.querySelectorAll('.section-tile[data-open]').forEach((tile) => {
+    tile.onclick = () => {
+      const key = tile.dataset.open;
+      if (key === 'calendar') { view = { type: 'calendar' }; calCursor = null; }
+      else view = { type: 'page', pageId: key.split(':')[1] };
+      render();
+    };
+  });
+}
+
+// ---------- Seção de conteúdo (Planejamento / Brand Guide / Relatórios) — somente leitura ----------
+function renderPageSection(el, pageId) {
+  const page = portalData.pages.find((p) => p.id === pageId);
+  if (!page) { view = { type: 'hub' }; return render(); }
+  el.innerHTML = `
+    <a href="#" class="back-link" id="back-to-hub" style="display:inline-block;margin-bottom:16px">&larr; Voltar</a>
+    <h2 style="margin:0 0 14px">${sectionIcon(page.title, page.type)} ${escapeHtml(page.title)}</h2>
+    <div class="page-content" style="cursor:default">${page.content && page.content.trim() ? page.content : '<p style="color:var(--text-dim)">Ainda não há conteúdo aqui.</p>'}</div>
+  `;
+  document.getElementById('back-to-hub').onclick = (e) => { e.preventDefault(); view = { type: 'hub' }; render(); };
+}
+
+// ---------- Calendário de Entrega: calendário real + lista do que não tem prazo ----------
+function buildMonthGrid(year, month) {
+  const first = new Date(year, month, 1);
+  const startWeekday = first.getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const daysInPrevMonth = new Date(year, month, 0).getDate();
+  const cells = [];
+  for (let i = startWeekday - 1; i >= 0; i--) cells.push({ day: daysInPrevMonth - i, inMonth: false, dateStr: null });
+  for (let d = 1; d <= daysInMonth; d++) cells.push({ day: d, inMonth: true, dateStr: `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}` });
+  let nextDay = 1;
+  while (cells.length % 7 !== 0) cells.push({ day: nextDay++, inMonth: false, dateStr: null });
+  return cells;
+}
+
+function renderCalendarSection(el) {
+  if (!calCursor) {
+    const now = new Date();
+    calCursor = { y: now.getFullYear(), m: now.getMonth() };
+  }
+  const { y, m } = calCursor;
+  const cells = buildMonthGrid(y, m);
+  const today = todayStr();
+  const demands = portalData.demands;
+  const dated = demands.filter((d) => d.prazo_final || d.prazo_designer);
+  const undated = demands.filter((d) => !d.prazo_final && !d.prazo_designer);
+
+  el.innerHTML = `
+    <a href="#" class="back-link" id="back-to-hub" style="display:inline-block;margin-bottom:16px">&larr; Voltar</a>
+    <div class="editor-toolbar">
+      <h2 style="margin:0;font-size:17px;font-weight:700">📅 Calendário de Entrega</h2>
+      <div class="cal-nav">
+        <button class="icon-btn" id="cal-prev" title="Mês anterior">‹</button>
+        <span class="cal-month-label">${MONTH_LABELS[m]} de ${y}</span>
+        <button class="icon-btn" id="cal-next" title="Próximo mês">›</button>
+        <button class="btn secondary small" id="cal-today">Hoje</button>
+      </div>
+    </div>
+    <div class="cal-scroll"><div class="cal-grid">
+      ${WEEKDAY_LABELS.map((w) => `<div class="cal-weekday">${w}</div>`).join('')}
+      ${cells.map((cell) => {
+        if (!cell.inMonth) return `<div class="cal-cell out-month"><div class="cal-daynum">${cell.day}</div></div>`;
+        const items = dated.filter((d) => d.prazo_final === cell.dateStr || d.prazo_designer === cell.dateStr);
+        const isToday = cell.dateStr === today;
+        return `
+          <div class="cal-cell ${isToday ? 'is-today' : ''}">
+            <div class="cal-daynum">${cell.day}${isToday ? ' <span class="cal-today-dot">hoje</span>' : ''}</div>
+            <div class="cal-items">
+              ${items.map((d) => {
+                const sd = statusDef(d.status);
+                const icon = d.prazo_final === cell.dateStr ? '🚀' : '🎨';
+                return `<div class="cal-chip tag-${sd.color}" data-open="${d.id}">${icon} ${escapeHtml(d.title)}</div>`;
+              }).join('')}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div></div>
+    ${undated.length ? `
+      <div style="margin-top:26px">
+        <h3 style="font-size:13px;font-weight:600;margin:0 0 10px">Sem prazo definido ainda</h3>
+        <div class="card-list">
+          ${undated.map((d) => {
+            const sd = statusDef(d.status);
+            return `
+              <div class="client-card" data-open="${d.id}" style="cursor:pointer">
+                <div>
+                  <div class="name">${escapeHtml(d.title)}</div>
+                  <div class="meta">${(d.format || []).join(', ')}</div>
+                </div>
+                <span class="tag tag-${sd.color}">${sd.label}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    ` : ''}
+  `;
+
+  document.getElementById('back-to-hub').onclick = (e) => { e.preventDefault(); view = { type: 'hub' }; render(); };
+  document.getElementById('cal-prev').onclick = () => {
+    calCursor.m -= 1;
+    if (calCursor.m < 0) { calCursor.m = 11; calCursor.y -= 1; }
+    render();
+  };
+  document.getElementById('cal-next').onclick = () => {
+    calCursor.m += 1;
+    if (calCursor.m > 11) { calCursor.m = 0; calCursor.y += 1; }
+    render();
+  };
+  document.getElementById('cal-today').onclick = () => {
+    const now = new Date();
+    calCursor = { y: now.getFullYear(), m: now.getMonth() };
+    render();
+  };
+  el.querySelectorAll('[data-open]').forEach((chip) => {
+    chip.onclick = () => openDemandDetail(chip.dataset.open);
+  });
+}
+
+// ---------- Detalhe da demanda: briefing + comentários (cliente só pode ADICIONAR) ----------
+function openDemandDetail(demandId) {
+  const demand = portalData.demands.find((d) => d.id === demandId);
+  if (!demand) return;
+  const sd = statusDef(demand.status);
+  const nameKey = 'was_portal_name_' + slug;
+  const savedName = localStorage.getItem(nameKey) || '';
+
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="dm-backdrop">
+      <div class="modal">
+        <h2>${escapeHtml(demand.title)}</h2>
+        <p style="color:var(--text-dim);font-size:12.5px;margin:2px 0 14px">
+          <span class="tag tag-${sd.color}">${sd.label}</span>
+          ${(demand.format || []).length ? ' · ' + escapeHtml((demand.format || []).join(', ')) : ''}
+          ${demand.prazo_final ? ' · prazo: ' + formatDateBR(demand.prazo_final) : ''}
+        </p>
+        ${demand.briefing ? `<div class="portal-briefing" style="margin-bottom:16px">${escapeHtml(demand.briefing)}</div>` : ''}
+        ${demand.link ? `<a href="${escapeHtml(demand.link)}" target="_blank" class="btn small secondary" style="margin-bottom:16px;display:inline-block">Abrir material</a>` : ''}
+
+        <div class="comments-list" id="dm-comments-list">
+          ${(demand.comments || []).length ? demand.comments.map((c) => `
+            <div class="comment-row">
+              <div class="comment-avatar">${initials(c.author)}</div>
+              <div class="comment-body">
+                <div class="comment-head"><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-time">${formatDateTimeBR(c.created_at)}</span></div>
+                <div class="comment-text">${escapeHtml(c.text)}</div>
+              </div>
+            </div>
+          `).join('') : '<div class="empty-state" style="padding:6px 0">Nenhum comentário ainda.</div>'}
+        </div>
+        <div class="comment-composer" style="margin-top:10px">
+          <input type="text" id="dm-comment-name" placeholder="Seu nome" value="${escapeHtml(savedName)}" style="width:100%;margin-bottom:6px" />
+          <textarea id="dm-comment-text" placeholder="Escreva um comentário para a equipe WAS..."></textarea>
+          <button class="btn small" id="dm-comment-send" style="margin-top:6px">Comentar</button>
+          <div id="dm-comment-error" style="color:var(--red);font-size:12px;margin-top:6px;display:none"></div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn" id="dm-close">Fechar</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('dm-close').onclick = closeDemandModal;
+  document.getElementById('dm-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'dm-backdrop') closeDemandModal();
+  });
+  document.getElementById('dm-comment-send').onclick = async () => {
+    const nameInput = document.getElementById('dm-comment-name');
+    const textInput = document.getElementById('dm-comment-text');
+    const author = nameInput.value.trim();
+    const text = textInput.value.trim();
+    const errEl0 = document.getElementById('dm-comment-error');
+    if (!author || !text) {
+      errEl0.textContent = 'Preencha seu nome e o comentário.';
+      errEl0.style.display = 'block';
+      return;
+    }
+    errEl0.style.display = 'none';
+    localStorage.setItem(nameKey, author);
+    try {
+      const res = await fetch(`/api/portal/${encodeURIComponent(slug)}/demands/${demandId}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author, text }),
+      });
+      if (!res.ok) throw new Error();
+      const updated = await res.json();
+      const idx = portalData.demands.findIndex((d) => d.id === demandId);
+      if (idx > -1) portalData.demands[idx] = updated;
+      openDemandDetail(demandId);
+    } catch (e) {
+      const errEl = document.getElementById('dm-comment-error');
+      errEl.textContent = 'Não foi possível enviar o comentário. Tente novamente.';
+      errEl.style.display = 'block';
+    }
+  };
+}
+function closeDemandModal() {
+  document.getElementById('modal-root').innerHTML = '';
 }
 
 init();

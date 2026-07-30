@@ -115,6 +115,36 @@ function addDaysStr(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// Calcula o intervalo [start, end] (strings ISO yyyy-mm-dd) para um período do dashboard.
+// Retorna null quando é "todo o período" (sem filtro).
+function computeDateRange(period, customStart, customEnd) {
+  const today = todayStr();
+  if (period === 'this_month') {
+    const [y, m] = today.split('-');
+    const start = `${y}-${m}-01`;
+    const lastDay = new Date(Number(y), Number(m), 0).getDate();
+    const end = `${y}-${m}-${String(lastDay).padStart(2, '0')}`;
+    return { start, end };
+  }
+  if (period === 'last_month') {
+    const d = new Date(today + 'T00:00:00');
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const lastDay = new Date(y, d.getMonth() + 1, 0).getDate();
+    return { start: `${y}-${m}-01`, end: `${y}-${m}-${String(lastDay).padStart(2, '0')}` };
+  }
+  if (period === 'next_30') {
+    return { start: today, end: addDaysStr(today, 30) };
+  }
+  if (period === 'custom') {
+    if (!customStart && !customEnd) return null;
+    return { start: customStart || '0000-01-01', end: customEnd || '9999-12-31' };
+  }
+  return null; // 'all'
+}
+
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -171,7 +201,7 @@ const state = {
   tableSelection: null,
   tableClipboard: null,
   tableUndoStack: [],
-  dashboardFilters: { clientId: '', responsible: '' },
+  dashboardFilters: { clientId: '', responsible: '', period: 'all', customStart: '', customEnd: '' },
   currentUser: null,
   calendarDateFilter: 'both',
 };
@@ -584,9 +614,13 @@ function computeWorkload(demandsForWorkload) {
 
 function renderDashboard(main) {
   const f = state.dashboardFilters;
+  const dateRange = computeDateRange(f.period, f.customStart, f.customEnd);
   const scoped = state.demands.filter((d) => {
     if (f.clientId && d.client_id !== f.clientId) return false;
     if (f.responsible && d.responsible !== f.responsible) return false;
+    if (dateRange) {
+      if (!d.prazo_final || d.prazo_final < dateRange.start || d.prazo_final > dateRange.end) return false;
+    }
     return true;
   });
 
@@ -638,7 +672,19 @@ function renderDashboard(main) {
         <option value="">Todos os responsáveis</option>
         ${activeTeamNames().map((n) => `<option value="${escapeHtml(n)}" ${f.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
       </select>
-      ${(f.clientId || f.responsible) ? '<button class="btn secondary small" id="dash-filter-clear">Limpar filtros</button>' : ''}
+      <select id="dash-filter-period">
+        <option value="all" ${f.period === 'all' ? 'selected' : ''}>Todo o período</option>
+        <option value="this_month" ${f.period === 'this_month' ? 'selected' : ''}>Este mês</option>
+        <option value="last_month" ${f.period === 'last_month' ? 'selected' : ''}>Mês passado</option>
+        <option value="next_30" ${f.period === 'next_30' ? 'selected' : ''}>Próximos 30 dias</option>
+        <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Personalizado</option>
+      </select>
+      ${f.period === 'custom' ? `
+        <input type="date" id="dash-filter-start" value="${f.customStart || ''}" />
+        <span style="color:var(--text-dim);font-size:12px">até</span>
+        <input type="date" id="dash-filter-end" value="${f.customEnd || ''}" />
+      ` : ''}
+      ${(f.clientId || f.responsible || f.period !== 'all') ? '<button class="btn secondary small" id="dash-filter-clear">Limpar filtros</button>' : ''}
     </div>
 
     <div class="grid-cards">
@@ -769,9 +815,23 @@ function renderDashboard(main) {
     state.dashboardFilters.responsible = e.target.value;
     renderDashboard(main);
   };
+  document.getElementById('dash-filter-period').onchange = (e) => {
+    state.dashboardFilters.period = e.target.value;
+    renderDashboard(main);
+  };
+  const startInput = document.getElementById('dash-filter-start');
+  if (startInput) startInput.onchange = (e) => {
+    state.dashboardFilters.customStart = e.target.value;
+    renderDashboard(main);
+  };
+  const endInput = document.getElementById('dash-filter-end');
+  if (endInput) endInput.onchange = (e) => {
+    state.dashboardFilters.customEnd = e.target.value;
+    renderDashboard(main);
+  };
   const clearBtn = document.getElementById('dash-filter-clear');
   if (clearBtn) clearBtn.onclick = () => {
-    state.dashboardFilters = { clientId: '', responsible: '' };
+    state.dashboardFilters = { clientId: '', responsible: '', period: 'all', customStart: '', customEnd: '' };
     renderDashboard(main);
   };
   main.querySelectorAll('.health-row[data-open]').forEach((el) => {
@@ -1365,7 +1425,7 @@ function renderCalendarPage(editor, page) {
       </div>
     </div>
     <p class="cal-hint">Arraste um card pra outro dia para mudar o prazo — como no Excel/Notion.</p>
-    <div class="cal-grid">
+    <div class="cal-scroll"><div class="cal-grid">
       ${WEEKDAY_LABELS.map((w) => `<div class="cal-weekday">${w}</div>`).join('')}
       ${cells.map((cell) => {
         if (!cell.inMonth) return `<div class="cal-cell out-month"><div class="cal-daynum">${cell.day}</div></div>`;
@@ -1388,7 +1448,7 @@ function renderCalendarPage(editor, page) {
           </div>
         `;
       }).join('')}
-    </div>
+    </div></div>
   `;
 
   editor.querySelector('#cal-prev').onclick = () => {
@@ -2787,7 +2847,11 @@ function openDemandModal(demand, defaultStatus) {
           <div class="comment-row">
             <div class="comment-avatar">${initials(c.author)}</div>
             <div class="comment-body">
-              <div class="comment-head"><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-time">${formatDateTimeBR(c.created_at)}</span></div>
+              <div class="comment-head">
+                <span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-time">${formatDateTimeBR(c.created_at)}</span>
+                ${c.via === 'client' ? '<span class="tag tag-default" style="font-size:9.5px;padding:1px 6px">via cliente</span>' : ''}
+                ${(state.currentUser && state.currentUser.name === c.author) ? `<button class="comment-del" data-del-comment="${c.id}" title="Excluir comentário">🗑</button>` : ''}
+              </div>
               <div class="comment-text">${renderCommentText(c.text)}</div>
             </div>
           </div>
@@ -2893,6 +2957,23 @@ function openDemandModal(demand, defaultStatus) {
     if (idx > -1) state.demands[idx].comments = updated.comments;
     openDemandModal(demand);
   };
+  document.querySelectorAll('.comment-del[data-del-comment]').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const commentId = btn.dataset.delComment;
+      const ok = await confirmDialog('Excluir este comentário?');
+      if (!ok) return;
+      try {
+        const updated = await api('/demands/' + demand.id + '/comments/' + commentId, { method: 'DELETE' });
+        demand.comments = updated.comments;
+        const idx = state.demands.findIndex((d) => d.id === demand.id);
+        if (idx > -1) state.demands[idx].comments = updated.comments;
+        openDemandModal(demand);
+      } catch (err) {
+        toast(err.message || 'Não foi possível excluir o comentário.', 'error');
+      }
+    };
+  });
 
   document.getElementById('btn-close').onclick = closeModal;
   document.getElementById('btn-delete').onclick = async () => {

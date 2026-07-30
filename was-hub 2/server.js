@@ -421,7 +421,51 @@ async function handleAPI(req, res, pathname, query) {
       if (!client) return sendJSON(res, 404, { error: 'Cliente não encontrado' });
       const demands = tenant.demands.filter((d) => d.client_id === client.id && d.status !== 'arquivado');
       const strategies = tenant.strategies.filter((s) => s.client_id === client.id && s.visible_to_client);
-      return sendJSON(res, 200, { client, demands, strategies });
+      const pages = (tenant.pages || [])
+        .filter((p) => p.client_id === client.id && !p.parent_id)
+        .sort((a, b) => (a.order || 0) - (b.order || 0));
+      return sendJSON(res, 200, { client, demands, strategies, pages });
+    }
+
+    // ---- PORTAL: cliente adiciona comentário numa demanda (só adiciona, nunca apaga/edita) ----
+    if (resource === 'portal' && resId && subResource === 'demands' && parts[4] && parts[5] === 'comments' && method === 'POST') {
+      const slug = resId;
+      const demandId = parts[4];
+      let client = null, tenant = null;
+      for (const t of Object.values(root.tenants)) {
+        const c = t.clients.find((c) => c.portal_slug === slug);
+        if (c) { client = c; tenant = t; break; }
+      }
+      if (!client) return sendJSON(res, 404, { error: 'Cliente não encontrado' });
+      const idx = tenant.demands.findIndex((d) => d.id === demandId && d.client_id === client.id);
+      if (idx === -1) return sendJSON(res, 404, { error: 'Entrega não encontrada' });
+      const body = await readBody(req);
+      const text = (body.text || '').trim();
+      const authorName = (body.author || '').trim() || client.name;
+      if (!text) return sendJSON(res, 400, { error: 'Comentário vazio' });
+      const comment = {
+        id: id(),
+        author: authorName,
+        text,
+        via: 'client',
+        created_at: new Date().toISOString(),
+      };
+      if (!Array.isArray(tenant.demands[idx].comments)) tenant.demands[idx].comments = [];
+      tenant.demands[idx].comments.push(comment);
+      if (tenant.demands[idx].responsible) {
+        tenant.notifications.push({
+          id: id(),
+          type: 'client_comment',
+          to: tenant.demands[idx].responsible,
+          from: authorName,
+          message: `${authorName} (${client.name}) comentou em "${tenant.demands[idx].title}": ${text}`,
+          demand_id: demandId,
+          read: false,
+          created_at: new Date().toISOString(),
+        });
+      }
+      saveDB(root);
+      return sendJSON(res, 201, tenant.demands[idx]);
     }
 
     // ---- AUTH (login / logout / cadastro público / usuário atual) ----
@@ -659,7 +703,7 @@ async function handleAPI(req, res, pathname, query) {
         if (query.client_id) list = list.filter((d) => d.client_id === query.client_id);
         return sendJSON(res, 200, list);
       }
-      if (method === 'POST') {
+      if (method === 'POST' && !resId) {
         const body = await readBody(req);
         let demand = {
           id: id(),
@@ -721,6 +765,23 @@ async function handleAPI(req, res, pathname, query) {
         });
         saveDB(root);
         return sendJSON(res, 201, db.demands[idx]);
+      }
+      // ---- excluir comentário: só o próprio autor pode excluir o seu (nunca o de outros) ----
+      if (resId && subResource === 'comments' && parts[4] && method === 'DELETE') {
+        const idx = db.demands.findIndex((d) => d.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
+        const commentId = parts[4];
+        const list = db.demands[idx].comments || [];
+        const cIdx = list.findIndex((c) => c.id === commentId);
+        if (cIdx === -1) return sendJSON(res, 404, { error: 'Comentário não encontrado' });
+        const me = (db.users || []).find((u) => u.id === session.userId);
+        const myName = me ? me.name : null;
+        if (!myName || list[cIdx].author !== myName) {
+          return sendJSON(res, 403, { error: 'Você só pode excluir os seus próprios comentários.' });
+        }
+        list.splice(cIdx, 1);
+        saveDB(root);
+        return sendJSON(res, 200, db.demands[idx]);
       }
       if (method === 'PUT' && resId) {
         const idx = db.demands.findIndex((d) => d.id === resId);

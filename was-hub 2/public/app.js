@@ -615,6 +615,27 @@ function renderDashboard(main) {
       render();
     };
   });
+  startDashboardAutoRefresh();
+}
+
+// Mantém o Dashboard vivo: enquanto a página estiver aberta, busca dados novos
+// periodicamente (pra refletir o que outra pessoa do time mexeu). Some sozinho
+// ao sair da página.
+let dashboardAutoRefreshTimer = null;
+function startDashboardAutoRefresh() {
+  if (dashboardAutoRefreshTimer) return;
+  dashboardAutoRefreshTimer = setInterval(async () => {
+    if (state.page !== 'dashboard') {
+      clearInterval(dashboardAutoRefreshTimer);
+      dashboardAutoRefreshTimer = null;
+      return;
+    }
+    if (document.querySelector('.modal-backdrop')) return; // não interrompe quem está editando
+    try {
+      await loadAll();
+      if (state.page === 'dashboard') renderDashboard(document.getElementById('main'));
+    } catch (e) { /* silencioso — tenta de novo no próximo ciclo */ }
+  }, 15000);
 }
 
 // ---------- Clientes (galeria estilo Notion) ----------
@@ -1528,9 +1549,27 @@ function renderKanban(root, filtered) {
 }
 
 function wireDemandCardEvents(root) {
+  root.querySelectorAll('.card-title-input').forEach((input) => {
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('mousedown', (e) => e.stopPropagation());
+    input.addEventListener('input', () => {
+      const demand = state.demands.find((d) => d.id === input.dataset.id);
+      patchInlineDebounced(demand, { title: input.value.trim() || 'Sem título' });
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+    });
+    input.addEventListener('blur', () => {
+      const demand = state.demands.find((d) => d.id === input.dataset.id);
+      if (demand) input.value = demand.title;
+    });
+  });
   root.querySelectorAll('.demand-card').forEach((el) => {
     const demand = state.demands.find((d) => d.id === el.dataset.id);
-    el.onclick = () => openDemandModal(demand);
+    el.onclick = (e) => {
+      if (e.target.closest('.card-title-input')) return;
+      openDemandModal(demand);
+    };
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       showContextMenu(e.pageX, e.pageY, [
@@ -1571,7 +1610,7 @@ function renderDemandCard(d) {
   const urg = urgencyClass(d);
   return `
     <div class="demand-card ${urg}" data-id="${d.id}" draggable="true">
-      <div class="title">${escapeHtml(d.title)}</div>
+      <input type="text" class="title card-title-input" data-id="${d.id}" value="${escapeHtml(d.title)}" />
       ${tags ? `<div class="tag-group">${tags}</div>` : ''}
       <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}</div>
       <div class="sub">

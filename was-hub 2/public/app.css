@@ -1074,7 +1074,7 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
   background: var(--panel);
 }
 .data-table td { padding: 10px 12px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
-.data-table .td-title { font-weight: 600; white-space: normal; min-width: 160px; }
+.data-table .td-title { font-weight: 600; white-space: normal; }
 .data-table tr:hover td { background: var(--panel-2); cursor: pointer; }
 .data-table tr:last-child td { border-bottom: none; }
 
@@ -1181,7 +1181,7 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .switch input:checked + .switch-slider:before { transform: translateX(16px); background: var(--blue); }
 
 /* ---- Tabela editável (edição inline) ---- */
-.data-table.editable td { padding: 4px 6px; }
+.data-table.editable td { padding: 4px 6px; overflow: hidden; }
 .data-table.editable th:first-child, .data-table.editable td:first-child { width: 30px; text-align: center; }
 .cell-input, .cell-select {
   background: transparent;
@@ -1195,7 +1195,7 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 }
 .cell-input:hover, .cell-select:hover { background: var(--panel-2); border-color: var(--border); }
 .cell-input:focus, .cell-select:focus { background: var(--panel-2); border-color: var(--blue); outline: none; }
-.cell-title { font-weight: 600; min-width: 160px; }
+.cell-title { font-weight: 600; }
 .cell-select { appearance: none; cursor: pointer; }
 .cell-multi-btn {
   background: transparent;

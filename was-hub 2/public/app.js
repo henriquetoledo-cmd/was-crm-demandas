@@ -2269,10 +2269,11 @@ function renderDemandTable(root, filtered) {
   state.tableRowIds = sorted.map((d) => d.id);
   const totalCols = state.tableColumnOrder.length + 3; // checkbox + colunas + spacer da coluna "+" + expandir
 
+  const DEFAULT_COL_WIDTH = { title: 220, client: 130, status: 150, format: 140, platform: 150, responsible: 100, priority: 90, prazo_designer: 110, prazo_final: 110, captacao: 140 };
   const headerCells = state.tableColumnOrder.map((colId) => {
-    const w = state.tableColumnWidths[colId];
+    const w = state.tableColumnWidths[colId] || DEFAULT_COL_WIDTH[colId] || 120;
     return `
-    <th draggable="true" data-col="${colId}" class="th-draggable" ${w ? `style="width:${w}px"` : ''}>
+    <th draggable="true" data-col="${colId}" class="th-draggable" style="width:${w}px">
       <span class="th-label">${escapeHtml(columnLabel(colId))}</span>
       ${state.customColumns.some((c) => c.id === colId) ? `<span class="th-del" data-delcol="${colId}" title="Excluir coluna">×</span>` : ''}
       <span class="th-resize-handle" data-resize="${colId}"></span>

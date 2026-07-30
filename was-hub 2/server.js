@@ -100,6 +100,53 @@ function ensureTenantShape(t) {
   t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; if (typeof d.capture_link !== 'string') d.capture_link = ''; });
 }
 
+const DONE_STATUSES_SRV = ['aprovado', 'postar', 'programado', 'postado', 'stand_by', 'arquivado'];
+
+function isoWeekKey(d) {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+// Toda segunda-feira, gera (uma única vez por semana) uma notificação individual pra cada
+// colaborador ativo com as demandas em que ele é responsável e vencem naquela semana.
+function maybeGenerateWeeklySummary(root, tenant) {
+  const hasActive = (tenant.automations || []).some((a) => a.active && a.kind === 'weekly_summary');
+  if (!hasActive) return;
+  const now = new Date();
+  if (now.getDay() !== 1) return; // só roda na segunda
+  const weekKey = isoWeekKey(now);
+  if (tenant.lastWeeklySummaryWeek === weekKey) return; // já gerado essa semana
+  const todayStr = now.toISOString().slice(0, 10);
+  const sundayDate = new Date(now);
+  sundayDate.setDate(sundayDate.getDate() + 6);
+  const sundayStr = sundayDate.toISOString().slice(0, 10);
+
+  (tenant.team || []).filter((m) => m.active).forEach((member) => {
+    const items = (tenant.demands || []).filter((d) =>
+      d.responsible === member.name &&
+      d.prazo_final && d.prazo_final >= todayStr && d.prazo_final <= sundayStr &&
+      !DONE_STATUSES_SRV.includes(d.status)
+    );
+    if (!items.length) return;
+    tenant.notifications.push({
+      id: id(),
+      type: 'weekly_summary',
+      to: member.name,
+      from: 'Automação',
+      message: `Resumo da semana: você tem ${items.length} entrega${items.length === 1 ? '' : 's'} com prazo até domingo (${items.map((d) => d.title).slice(0, 3).join(', ')}${items.length > 3 ? '...' : ''}).`,
+      demand_ids: items.map((d) => d.id),
+      read: false,
+      created_at: new Date().toISOString(),
+    });
+  });
+  tenant.lastWeeklySummaryWeek = weekKey;
+  saveDB(root);
+}
+
 function loadDB() {
   let db;
   if (!fs.existsSync(DATA_FILE)) {
@@ -541,6 +588,7 @@ async function handleAPI(req, res, pathname, query) {
       return sendJSON(res, 401, { error: 'Não autenticado' });
     }
     const db = root.tenants[session.tenantId];
+    maybeGenerateWeeklySummary(root, db);
 
     // ---- CLIENTS ----
     if (resource === 'clients') {

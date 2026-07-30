@@ -204,6 +204,7 @@ const state = {
   dashboardFilters: { clientId: '', responsible: '', period: 'all', customStart: '', customEnd: '' },
   currentUser: null,
   calendarDateFilter: 'both',
+  minhasDemandasFilters: { period: 'all', customStart: '', customEnd: '', showDone: false },
 };
 
 // ---------- API helpers ----------
@@ -338,6 +339,7 @@ function render() {
   if (state.page === 'clientes') return renderClientes(main);
   if (state.page === 'cliente-detail') return renderClienteDetail(main);
   if (state.page === 'demandas') return renderDemandas(main);
+  if (state.page === 'minhas-demandas') return renderMinhasDemandas(main);
   if (state.page === 'notificacoes') return renderNotificacoes(main);
   if (state.page === 'automacoes') return renderAutomacoes(main);
   if (state.page === 'visao-cliente') return renderVisaoCliente(main);
@@ -3038,19 +3040,107 @@ function renderNotifSection(title, colorClass, count, itemsHtml) {
   `;
 }
 
+function renderMinhasDemandas(main) {
+  const myName = state.currentUser && state.currentUser.name;
+  const f = state.minhasDemandasFilters;
+  const dateRange = computeDateRange(f.period, f.customStart, f.customEnd);
+  let mine = state.demands.filter((d) => d.responsible === myName);
+  if (!f.showDone) mine = mine.filter((d) => !DONE_STATUSES.includes(d.status));
+  if (dateRange) {
+    mine = mine.filter((d) => d.prazo_final && d.prazo_final >= dateRange.start && d.prazo_final <= dateRange.end);
+  }
+
+  const today = todayStr();
+  const overdue = mine.filter((d) => d.prazo_final && d.prazo_final < today && !DONE_STATUSES.includes(d.status));
+  const thisWeek = mine.filter((d) => d.prazo_final && d.prazo_final >= today && d.prazo_final <= addDaysStr(today, 7) && !overdue.includes(d));
+  const later = mine.filter((d) => d.prazo_final && d.prazo_final > addDaysStr(today, 7));
+  const noDate = mine.filter((d) => !d.prazo_final);
+  const doneGroup = f.showDone ? mine.filter((d) => DONE_STATUSES.includes(d.status)) : [];
+  const notDoneIds = new Set([...overdue, ...thisWeek, ...later, ...noDate].map((d) => d.id));
+  const doneOnly = doneGroup.filter((d) => !notDoneIds.has(d.id));
+
+  const sortByPrazo = (arr) => [...arr].sort((a, b) => (a.prazo_final || '9999') < (b.prazo_final || '9999') ? -1 : 1);
+
+  const group = (label, colorClass, items) => {
+    if (!items.length) return '';
+    return `
+      <div class="dash-panel" style="margin-bottom:16px">
+        <div class="notif-section-title ${colorClass}">${label} <span class="count">${items.length}</span></div>
+        <div class="card-list" style="margin-top:10px">${sortByPrazo(items).map(renderDemandCard).join('')}</div>
+      </div>
+    `;
+  };
+
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Minha Demanda</h1>
+        <p>Tudo que está sob sua responsabilidade, num só lugar</p>
+      </div>
+    </div>
+
+    <div class="dash-filters">
+      <select id="minhas-filter-period">
+        <option value="all" ${f.period === 'all' ? 'selected' : ''}>Todo o período</option>
+        <option value="this_month" ${f.period === 'this_month' ? 'selected' : ''}>Este mês</option>
+        <option value="next_30" ${f.period === 'next_30' ? 'selected' : ''}>Próximos 30 dias</option>
+        <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Personalizado</option>
+      </select>
+      ${f.period === 'custom' ? `
+        <input type="date" id="minhas-filter-start" value="${f.customStart || ''}" />
+        <span style="color:var(--text-dim);font-size:12px">até</span>
+        <input type="date" id="minhas-filter-end" value="${f.customEnd || ''}" />
+      ` : ''}
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-dim);cursor:pointer">
+        <input type="checkbox" id="minhas-filter-done" ${f.showDone ? 'checked' : ''} /> Mostrar concluídas
+      </label>
+      ${(f.period !== 'all' || f.showDone) ? '<button class="btn secondary small" id="minhas-filter-clear">Limpar filtros</button>' : ''}
+    </div>
+
+    ${mine.length ? `
+      ${group('⚠️ Atrasadas', 'red', overdue)}
+      ${group('🚀 Esta semana', 'orange', thisWeek)}
+      ${group('📅 Mais adiante', 'blue', later)}
+      ${group('🗓️ Sem prazo definido', 'gray', noDate)}
+      ${group('✅ Concluídas', 'green', doneOnly)}
+    ` : '<div class="empty-state">Nenhuma demanda sob sua responsabilidade no momento. 🎉</div>'}
+  `;
+
+  wireDemandCardEvents(main);
+
+  const periodSel = document.getElementById('minhas-filter-period');
+  if (periodSel) periodSel.onchange = (e) => { state.minhasDemandasFilters.period = e.target.value; render(); };
+  const startInput = document.getElementById('minhas-filter-start');
+  if (startInput) startInput.onchange = (e) => { state.minhasDemandasFilters.customStart = e.target.value; render(); };
+  const endInput = document.getElementById('minhas-filter-end');
+  if (endInput) endInput.onchange = (e) => { state.minhasDemandasFilters.customEnd = e.target.value; render(); };
+  const doneCheck = document.getElementById('minhas-filter-done');
+  if (doneCheck) doneCheck.onchange = (e) => { state.minhasDemandasFilters.showDone = e.target.checked; render(); };
+  const clearBtn = document.getElementById('minhas-filter-clear');
+  if (clearBtn) clearBtn.onclick = () => { state.minhasDemandasFilters = { period: 'all', customStart: '', customEnd: '', showDone: false }; render(); };
+}
+
 function renderNotificacoes(main) {
   const n = computeNotifications();
+  const MENTION_TYPE_META = {
+    mention: { icon: '💬', title: (m) => `${escapeHtml(m.from)} te marcou` },
+    client_comment: { icon: '💬', title: (m) => `${escapeHtml(m.from)} comentou` },
+    weekly_summary: { icon: '🗓️', title: () => 'Resumo da semana' },
+  };
   const mentions = myMentionNotifications().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  const mentionHtml = mentions.map((m) => `
+  const mentionHtml = mentions.map((m) => {
+    const meta = MENTION_TYPE_META[m.type] || MENTION_TYPE_META.mention;
+    return `
     <div class="notif-row ${m.read ? '' : 'notif-unread'}" data-open="${m.demand_id}" data-mention-id="${m.id}">
-      <span class="notif-icon">💬</span>
+      <span class="notif-icon">${meta.icon}</span>
       <div class="notif-body">
-        <div class="notif-title">${escapeHtml(m.from)} te marcou</div>
+        <div class="notif-title">${meta.title(m)}</div>
         <div class="notif-meta">${escapeHtml(m.message)}</div>
       </div>
     </div>
-  `).join('');
-  const mentionSection = renderNotifSection('Você foi marcado', 'pink', mentions.length, mentionHtml);
+  `;
+  }).join('');
+  const mentionSection = renderNotifSection('Avisos e menções', 'pink', mentions.length, mentionHtml);
 
   const overdueHtml = n.overdue.map((d) => notifRow('⚠️', d.title, `${escapeHtml(clientName(d.client_id))} · vencia em ${formatDateBR(d.prazo_final)}`, d)).join('');
   const todayHtml = n.dueToday.map((d) => notifRow('🚀', d.title, `${escapeHtml(clientName(d.client_id))} · entrega hoje`, d)).join('');
@@ -3088,23 +3178,6 @@ function renderNotificacoes(main) {
     stageAlertHtml,
   ].join('');
 
-  let weeklyHtml = '';
-  if (n.weeklySummary) {
-    const rows = n.weeklySummary.days.map((g) => `
-      <div class="weekly-day-group">
-        <div class="weekly-day-label">${formatDateBR(g.dateStr)}</div>
-        ${g.items.map((d) => notifRow('📌', d.title, `${escapeHtml(clientName(d.client_id))} · ${escapeHtml(statusDef(d.status).label)}`, d)).join('')}
-      </div>
-    `).join('');
-    weeklyHtml = `
-      <div class="notif-section weekly-summary">
-        <div class="notif-section-title blue">🗓️ Resumo da semana <span class="count">${n.weeklySummary.total}</span></div>
-        <p class="dash-panel-sub" style="margin:2px 0 10px">Tudo que vence entre hoje e domingo, gerado automaticamente toda segunda-feira.</p>
-        <div class="notif-list">${rows}</div>
-      </div>
-    `;
-  }
-
   main.innerHTML = `
     <div class="page-header">
       <div>
@@ -3112,14 +3185,14 @@ function renderNotificacoes(main) {
         <p>Tudo que precisa da sua atenção agora, num só lugar</p>
       </div>
     </div>
-    ${weeklyHtml}
-    ${sections || (!weeklyHtml ? '<div class="empty-state">Tudo em dia — nenhuma pendência no momento. 🎉</div>' : '')}
+    ${sections || '<div class="empty-state">Tudo em dia — nenhuma pendência no momento. 🎉</div>'}
   `;
 
   main.querySelectorAll('.notif-row').forEach((row) => {
     row.onclick = () => {
       if (row.dataset.mentionId) api('/notifications/' + row.dataset.mentionId, { method: 'PUT', body: JSON.stringify({ read: true }) });
-      openDemandModal(state.demands.find((d) => d.id === row.dataset.open));
+      const demand = state.demands.find((d) => d.id === row.dataset.open);
+      if (demand) openDemandModal(demand);
     };
   });
 }

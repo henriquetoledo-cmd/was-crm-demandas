@@ -31,6 +31,8 @@ const STATUS_DEFS = [
   { key: 'stand_by', label: 'Stand By', color: 'gray' },
   { key: 'arquivado', label: 'Arquivado', color: 'default' },
 ];
+const PRIORIDADE_LABELS = { normal: 'Normal', alta: 'Alta', urgente: 'Urgente' };
+const FORECAST_LABELS = { prevista: 'Prevista', nao_prevista: 'Não prevista' };
 const WEEKDAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const MONTH_LABELS = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 
@@ -272,11 +274,25 @@ function openDemandDetail(demandId) {
         <h2>${escapeHtml(demand.title)}</h2>
         <p style="color:var(--text-dim);font-size:12.5px;margin:2px 0 14px">
           <span class="tag tag-${sd.color}">${sd.label}</span>
-          ${(demand.format || []).length ? ' · ' + escapeHtml((demand.format || []).join(', ')) : ''}
-          ${demand.prazo_final ? ' · prazo: ' + formatDateBR(demand.prazo_final) : ''}
+          ${demand.priority ? ` <span class="tag tag-${(PRIORIDADE_LABELS[demand.priority] ? {normal:'green',alta:'orange',urgente:'red'}[demand.priority] : 'default')}">${PRIORIDADE_LABELS[demand.priority] || demand.priority}</span>` : ''}
         </p>
-        ${demand.briefing ? `<div class="portal-briefing" style="margin-bottom:16px">${escapeHtml(demand.briefing)}</div>` : ''}
-        ${demand.link ? `<a href="${escapeHtml(demand.link)}" target="_blank" class="btn small secondary" style="margin-bottom:16px;display:inline-block">Abrir material</a>` : ''}
+
+        <div class="dm-field-grid">
+          ${(demand.format || []).length ? `<div><label>Formato</label><div>${escapeHtml((demand.format || []).join(', '))}</div></div>` : ''}
+          ${(demand.platform || []).length ? `<div><label>Plataforma</label><div>${escapeHtml((demand.platform || []).join(', '))}</div></div>` : ''}
+          ${demand.responsible ? `<div><label>Responsável</label><div>${escapeHtml(demand.responsible)}</div></div>` : ''}
+          ${demand.forecast ? `<div><label>Previsão</label><div>${FORECAST_LABELS[demand.forecast] || demand.forecast}</div></div>` : ''}
+          ${demand.prazo_designer ? `<div><label>Prazo designer</label><div>${formatDateBR(demand.prazo_designer)}</div></div>` : ''}
+          ${demand.prazo_final ? `<div><label>Prazo final</label><div>${formatDateBR(demand.prazo_final)}</div></div>` : ''}
+          ${demand.needs_capture && demand.capture_date ? `<div><label>Data de captação</label><div>${formatDateBR(demand.capture_date)}</div></div>` : ''}
+        </div>
+
+        ${demand.briefing ? `<div style="margin-top:14px"><label class="dm-field-label">Briefing</label><div class="portal-briefing">${escapeHtml(demand.briefing)}</div></div>` : ''}
+        ${demand.description ? `<div style="margin-top:10px"><label class="dm-field-label">Notas</label><div class="portal-briefing">${escapeHtml(demand.description)}</div></div>` : ''}
+        <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+          ${demand.link ? `<a href="${escapeHtml(demand.link)}" target="_blank" class="btn small secondary">Abrir material</a>` : ''}
+          ${demand.capture_link ? `<a href="${escapeHtml(demand.capture_link)}" target="_blank" class="btn small secondary">🔗 Material de captação</a>` : ''}
+        </div>
 
         <div class="comments-list" id="dm-comments-list">
           ${(demand.comments || []).length ? demand.comments.map((c) => `

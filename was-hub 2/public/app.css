@@ -1129,6 +1129,8 @@ label { font-size: 12px; color: var(--text-dim); display: block; margin: 12px 0 
 .notif-section-title.purple { color: #a78bfa; }
 .notif-section-title.pink { color: #f472b6; }
 .notif-section-title .count { background: var(--panel-2); color: var(--text-dim); font-size: 10px; padding: 1px 7px; border-radius: 100px; }
+.notif-section-title.green { color: var(--green, #34d399); }
+.notif-section-title.gray { color: var(--text-dim); }
 .notif-row.notif-unread { background: rgba(244,114,182,.08); border-left: 2px solid #f472b6; }
 .notif-list { display: flex; flex-direction: column; gap: 6px; }
 .weekly-summary {
@@ -1421,3 +1423,16 @@ td[data-row][data-col].cell-selected {
   .section-grid, .clients-grid { grid-template-columns: 1fr 1fr; }
   .kanban-col { min-width: 210px; max-width: 210px; }
 }
+
+/* ---------- Portal: grid de campos no detalhe da demanda (visão completa do card) ---------- */
+.dm-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.dm-field-grid label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint); margin-bottom: 2px; }
+.dm-field-grid > div > div { font-size: 13px; color: var(--text); }
+.dm-field-label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint); margin-bottom: 4px; }

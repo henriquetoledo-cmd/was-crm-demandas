@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Portal do Cliente — WAS</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <div id="content">
+    <div class="portal-body"><p style="color:var(--text-dim)">Carregando...</p></div>
+  </div>
+
+<script>
+const STATUS_LABELS = {
+  em_briefing: 'Em briefing',
+  aprovacao_briefing: 'Aguardando aprovação do briefing',
+  aguardando_infos: 'Aguardando infos/materiais',
+  aguardando_captacao: 'Aguardando captação',
+  a_fazer_design: 'A fazer - Design',
+  em_criacao_design: 'Em criação (design)',
+  em_ajuste_design: 'Em ajuste (design)',
+  pronto_envio_design: 'Pronto para envio (design)',
+  em_aprovacao_cliente: 'Aguardando sua aprovação',
+  freela: 'Freela',
+  aprovado: 'Aprovado',
+  postar: 'Postar',
+  programado: 'Programado',
+  postado: 'Postado',
+  stand_by: 'Stand By',
+};
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function formatDateBR(iso) {
+  if (!iso) return '';
+  const parts = iso.split('-');
+  if (parts.length !== 3) return iso;
+  const [y, m, d] = parts;
+  return `${d}/${m}/${y}`;
+}
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  const slug = params.get('slug');
+  const content = document.getElementById('content');
+
+  if (!slug) {
+    content.innerHTML = '<div class="portal-body"><p>Link inválido. Peça o link correto para a equipe WAS.</p></div>';
+    return;
+  }
+
+  let data;
+  try {
+    const res = await fetch('/api/portal/' + encodeURIComponent(slug));
+    if (!res.ok) throw new Error();
+    data = await res.json();
+  } catch (e) {
+    content.innerHTML = '<div class="portal-body"><p>Cliente não encontrado. Verifique o link.</p></div>';
+    return;
+  }
+
+  const { client, demands, strategies } = data;
+
+  const grouped = {};
+  Object.keys(STATUS_LABELS).forEach((k) => (grouped[k] = []));
+  demands.forEach((d) => grouped[d.status]?.push(d));
+
+  content.innerHTML = `
+    <div class="portal-header">
+      <div class="portal-brand">We Are Sinergy</div>
+      <h1>${escapeHtml(client.name)}</h1>
+      <p>Acompanhamento de entregas em tempo real</p>
+    </div>
+    <div class="portal-body">
+      <div class="portal-section">
+        <h2>Status das entregas</h2>
+        ${demands.length ? Object.entries(STATUS_LABELS).map(([key, label]) => {
+          const items = grouped[key];
+          if (!items.length) return '';
+          return `
+            <div style="margin-bottom:20px">
+              <div class="portal-group-label">${label} <span class="tag tag-default">${items.length}</span></div>
+              <div class="card-list">
+                ${items.map((d) => `
+                  <div class="client-card" style="flex-direction:column;align-items:stretch;gap:8px">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+                      <div>
+                        <div class="name">${escapeHtml(d.title)}</div>
+                        <div class="meta">${(d.format || []).join(', ')}${d.prazo_final ? ' · prazo: ' + formatDateBR(d.prazo_final) : ''}</div>
+                      </div>
+                      ${d.link ? `<a href="${escapeHtml(d.link)}" target="_blank" class="btn small secondary">Abrir</a>` : ''}
+                    </div>
+                    ${d.briefing ? `<div class="portal-briefing"><strong>Briefing:</strong> ${escapeHtml(d.briefing)}</div>` : ''}
+                    ${(d.comments || []).length ? `
+                      <div class="portal-comments">
+                        ${d.comments.map((c) => `
+                          <div class="portal-comment">
+                            <span class="portal-comment-author">${escapeHtml(c.author)}:</span>
+                            <span>${escapeHtml(c.text)}</span>
+                          </div>
+                        `).join('')}
+                      </div>
+                    ` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          `;
+        }).join('') : '<div class="empty-state">Nenhuma entrega compartilhada ainda.</div>'}
+      </div>
+
+      ${strategies.length ? `
+        <div class="portal-section">
+          <h2>Estratégia</h2>
+          ${strategies.map((s) => `
+            <div class="strategy-doc">
+              <h3>${escapeHtml(s.title)}</h3>
+              <div class="meta">${s.period ? escapeHtml(s.period) : ''}</div>
+              <div class="content">${escapeHtml(s.content)}</div>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+      <div class="portal-footer">Powered by WAS — We Are Sinergy</div>
+    </div>
+  `;
+}
+
+init();
+</script>
+</body>
+</html>

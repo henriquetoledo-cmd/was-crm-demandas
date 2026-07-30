@@ -1559,10 +1559,6 @@ function wireDemandCardEvents(root) {
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') input.blur();
     });
-    input.addEventListener('blur', () => {
-      const demand = state.demands.find((d) => d.id === input.dataset.id);
-      if (demand) input.value = demand.title;
-    });
   });
   root.querySelectorAll('.demand-card').forEach((el) => {
     const demand = state.demands.find((d) => d.id === el.dataset.id);

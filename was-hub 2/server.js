@@ -97,7 +97,7 @@ function ensureTenantShape(t) {
   if (!t.notifications) t.notifications = [];
   if (!t.customFormatOptions) t.customFormatOptions = [];
   if (!t.customPlatformOptions) t.customPlatformOptions = [];
-  t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; });
+  t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; if (typeof d.capture_link !== 'string') d.capture_link = ''; });
 }
 
 function loadDB() {
@@ -419,7 +419,7 @@ async function handleAPI(req, res, pathname, query) {
         if (c) { client = c; tenant = t; break; }
       }
       if (!client) return sendJSON(res, 404, { error: 'Cliente não encontrado' });
-      const demands = tenant.demands.filter((d) => d.client_id === client.id && d.visible_to_client && d.status !== 'arquivado');
+      const demands = tenant.demands.filter((d) => d.client_id === client.id && d.status !== 'arquivado');
       const strategies = tenant.strategies.filter((s) => s.client_id === client.id && s.visible_to_client);
       return sendJSON(res, 200, { client, demands, strategies });
     }
@@ -672,6 +672,7 @@ async function handleAPI(req, res, pathname, query) {
           status: body.status || 'em_briefing',
           needs_capture: body.needs_capture === undefined ? true : !!body.needs_capture,
           capture_date: body.capture_date || '',
+          capture_link: body.capture_link || '',
           prazo_designer: body.prazo_designer || '',
           prazo_final: body.prazo_final || '',
           responsible: body.responsible || '',

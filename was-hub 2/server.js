@@ -94,6 +94,10 @@ function ensureTenantShape(t) {
   if (!t.viewPrefs) t.viewPrefs = { tableColumnOrder: [] };
   if (!t.users) t.users = [];
   if (!t.plan) t.plan = 'free';
+  if (!t.notifications) t.notifications = [];
+  if (!t.customFormatOptions) t.customFormatOptions = [];
+  if (!t.customPlatformOptions) t.customPlatformOptions = [];
+  t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; });
 }
 
 function loadDB() {
@@ -403,6 +407,7 @@ async function handleAPI(req, res, pathname, query) {
   const parts = pathname.split('/').filter(Boolean); // ['api','clients', ':id']
   const resource = parts[1]; // clients | demands | strategies | pages | team | automations | portal | auth
   const resId = parts[2];
+  const subResource = parts[3]; // ex: demands/:id/comments
 
   try {
     // ---- PORTAL (leitura pública, filtrada por slug do cliente — procura em todos os tenants) ----
@@ -676,12 +681,45 @@ async function handleAPI(req, res, pathname, query) {
           visible_to_client: !!body.visible_to_client,
           link: body.link || '',
           custom_fields: (body.custom_fields && typeof body.custom_fields === 'object') ? body.custom_fields : {},
+          comments: [],
           created_at: new Date().toISOString(),
         };
         demand = applyAutomations(db, demand);
         db.demands.push(demand);
         saveDB(root);
         return sendJSON(res, 201, demand);
+      }
+      // ---- comentários com @menção (gera notificação in-app pra quem foi marcado) ----
+      if (resId && subResource === 'comments' && method === 'POST') {
+        const idx = db.demands.findIndex((d) => d.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
+        const body = await readBody(req);
+        const text = (body.text || '').trim();
+        if (!text) return sendJSON(res, 400, { error: 'Comentário vazio' });
+        const comment = {
+          id: id(),
+          author: body.author || 'Alguém',
+          text,
+          created_at: new Date().toISOString(),
+        };
+        if (!Array.isArray(db.demands[idx].comments)) db.demands[idx].comments = [];
+        db.demands[idx].comments.push(comment);
+        // detecta @Nome pra cada membro do time e gera notificação in-app
+        const mentioned = (db.team || []).filter((member) => text.includes('@' + member.name));
+        mentioned.forEach((member) => {
+          db.notifications.push({
+            id: id(),
+            type: 'mention',
+            to: member.name,
+            from: comment.author,
+            message: `${comment.author} marcou você em "${db.demands[idx].title}": ${text}`,
+            demand_id: resId,
+            read: false,
+            created_at: new Date().toISOString(),
+          });
+        });
+        saveDB(root);
+        return sendJSON(res, 201, db.demands[idx]);
       }
       if (method === 'PUT' && resId) {
         const idx = db.demands.findIndex((d) => d.id === resId);
@@ -699,6 +737,47 @@ async function handleAPI(req, res, pathname, query) {
         db.demands = db.demands.filter((d) => d.id !== resId);
         saveDB(root);
         return sendJSON(res, 200, { ok: true });
+      }
+    }
+
+    // ---- NOTIFICAÇÕES (menções em comentários) ----
+    if (resource === 'notifications') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.notifications || []);
+      if (method === 'PUT' && resId) {
+        const idx = (db.notifications || []).findIndex((n) => n.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
+        const body = await readBody(req);
+        db.notifications[idx] = { ...db.notifications[idx], ...body, id: resId };
+        saveDB(root);
+        return sendJSON(res, 200, db.notifications[idx]);
+      }
+    }
+
+    // ---- OPÇÕES CUSTOMIZADAS de Formato / Plataforma (adicionadas direto no card) ----
+    if (resource === 'format-options') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.customFormatOptions || []);
+      if (method === 'POST') {
+        const body = await readBody(req);
+        const name = (body.name || '').trim();
+        if (!name) return sendJSON(res, 400, { error: 'Nome vazio' });
+        if (!(db.customFormatOptions || []).some((o) => o.name.toLowerCase() === name.toLowerCase())) {
+          db.customFormatOptions.push({ name, color: body.color || 'gray' });
+          saveDB(root);
+        }
+        return sendJSON(res, 201, db.customFormatOptions);
+      }
+    }
+    if (resource === 'platform-options') {
+      if (method === 'GET' && !resId) return sendJSON(res, 200, db.customPlatformOptions || []);
+      if (method === 'POST') {
+        const body = await readBody(req);
+        const name = (body.name || '').trim();
+        if (!name) return sendJSON(res, 400, { error: 'Nome vazio' });
+        if (!(db.customPlatformOptions || []).some((o) => o.name.toLowerCase() === name.toLowerCase())) {
+          db.customPlatformOptions.push({ name, color: body.color || 'gray' });
+          saveDB(root);
+        }
+        return sendJSON(res, 201, db.customPlatformOptions);
       }
     }
 

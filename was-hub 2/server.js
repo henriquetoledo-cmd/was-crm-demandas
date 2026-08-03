@@ -281,6 +281,25 @@ function filterDemandsForUser(demands, user) {
   return demands.filter((d) => allowed.has(d.client_id));
 }
 
+// Notifica a pessoa quando ela é definida (ou trocada) como responsável por uma demanda —
+// "faz parte do card" = é a pessoa dona da demanda. Não notifica se a pessoa se atribuiu a si mesma.
+function notifyAssignment(tenant, demand, previousResponsible, actingUser) {
+  const newResponsible = demand.responsible || '';
+  if (!newResponsible || newResponsible === previousResponsible) return;
+  const actingName = actingUser ? actingUser.name : null;
+  if (newResponsible === actingName) return;
+  tenant.notifications.push({
+    id: id(),
+    type: 'assignment',
+    to: newResponsible,
+    from: actingName || 'Alguém',
+    message: `${actingName || 'Alguém'} te definiu como responsável por "${demand.title}"`,
+    demand_id: demand.id,
+    read: false,
+    created_at: new Date().toISOString(),
+  });
+}
+
 const sessions = new Map(); // token -> { tenantId, userId, createdAt }
 
 // ---- Rate limit de login (por IP, em memória) — freia brute force de senha ----
@@ -1020,6 +1039,7 @@ async function handleAPI(req, res, pathname, query) {
         };
         demand = applyAutomations(db, demand);
         db.demands.push(demand);
+        notifyAssignment(db, demand, '', me);
         saveDB(root);
         return sendJSON(res, 201, demand);
       }
@@ -1076,11 +1096,13 @@ async function handleAPI(req, res, pathname, query) {
         const idx = db.demands.findIndex((d) => d.id === resId);
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
+        const previousResponsible = db.demands[idx].responsible || '';
         // custom_fields é mesclado (não substituído), pra edições em colunas diferentes não se apagarem
         const mergedCustom = { ...(db.demands[idx].custom_fields || {}), ...(body.custom_fields || {}) };
         let demand = { ...db.demands[idx], ...body, id: resId, custom_fields: mergedCustom };
         demand = applyAutomations(db, demand);
         db.demands[idx] = demand;
+        notifyAssignment(db, demand, previousResponsible, me);
         saveDB(root);
         return sendJSON(res, 200, db.demands[idx]);
       }

@@ -433,6 +433,21 @@ function renderVisaoCliente(main) {
 const DEADLINE_FIELD_LABELS = { prazo_final: 'Prazo final', prazo_designer: 'Prazo designer', capture_date: 'Captação' };
 const DEADLINE_DAYS_LABELS = { 0: 'no dia', 1: '1 dia antes', 2: '2 dias antes', 3: '3 dias antes', 5: '5 dias antes', 7: '7 dias antes' };
 
+// ---------- Individualização: cada pessoa só vê o que é dela; admin (Henrique/Vitória) vê tudo ----------
+function myTeamRoles() {
+  const myName = state.currentUser && state.currentUser.name;
+  if (!myName) return [];
+  const member = state.team.find((t) => t.name === myName);
+  return member ? (member.roles || []) : [];
+}
+
+// "Faz parte do card" = é a pessoa responsável pela demanda (modelo atual é de responsável único).
+function isRelevantToMe(d) {
+  if (isAdminUser()) return true;
+  const myName = state.currentUser && state.currentUser.name;
+  return !!myName && d.responsible === myName;
+}
+
 function computeDeadlineAlerts() {
   const today = todayStr();
   return (state.automations || [])
@@ -443,6 +458,7 @@ function computeDeadlineAlerts() {
       const targetDate = addDaysStr(today, daysBefore);
       const items = state.demands.filter((d) => {
         if (DONE_STATUSES.includes(d.status)) return false;
+        if (!isRelevantToMe(d)) return false;
         if (field === 'capture_date') {
           if (d.needs_capture === false) return false;
           return d.capture_date === targetDate;
@@ -462,12 +478,22 @@ function audienceRole(audience) {
   return { filmmakers: 'Filmmaker', designers: 'Designer', social_media: 'Social Media' }[audience] || null;
 }
 
+// Admin sempre vê. Pessoa comum só vê o alerta se ela for a responsável (audience 'responsible')
+// ou se o cargo dela bater com a audiência do alerta (ex.: só Designers veem alerta pra Designers).
+function amInAudience(audience, d) {
+  if (isAdminUser()) return true;
+  const myName = state.currentUser && state.currentUser.name;
+  if (audience === 'responsible') return !!myName && d.responsible === myName;
+  const role = audienceRole(audience);
+  return !!role && myTeamRoles().includes(role);
+}
+
 function computeStageAlerts() {
   const autos = (state.automations || []).filter((a) => a.active && a.kind === 'stage_alert');
   return autos.map((auto) => {
     const status = auto.trigger.status;
     const audience = auto.action.audience;
-    const items = state.demands.filter((d) => d.status === status);
+    const items = state.demands.filter((d) => d.status === status && amInAudience(audience, d));
     const role = audienceRole(audience);
     const audienceNames = role ? activeTeamNames().filter((n) => (state.team.find((t) => t.name === n).roles || []).includes(role)) : null;
     return { auto, status, audience, audienceNames, items };
@@ -501,6 +527,7 @@ function computeNotifications() {
   const waitingClient = [];
 
   state.demands.forEach((d) => {
+    if (!isRelevantToMe(d)) return;
     const done = DONE_STATUSES.includes(d.status);
     if (d.prazo_final && !done) {
       if (d.prazo_final < today) overdue.push(d);
@@ -3227,6 +3254,7 @@ function renderNotificacoes(main) {
     mention: { icon: '💬', title: (m) => `${escapeHtml(m.from)} te marcou` },
     client_comment: { icon: '💬', title: (m) => `${escapeHtml(m.from)} comentou` },
     weekly_summary: { icon: '🗓️', title: () => 'Resumo da semana' },
+    assignment: { icon: '🧑‍💼', title: (m) => `${escapeHtml(m.from)} te atribuiu uma demanda` },
   };
   const mentions = myMentionNotifications().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   const mentionHtml = mentions.map((m) => {

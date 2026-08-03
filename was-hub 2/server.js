@@ -198,12 +198,32 @@ function saveDB(db) {
 }
 
 // ---------- Autenticação ----------
+// Hash forte com salt por usuário (PBKDF2, 100k iterações). Formato: pbkdf2$<salt>$<hash>
 function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256').toString('hex');
+  return `pbkdf2$${salt}$${hash}`;
+}
+
+function legacyHashPassword(password) {
+  // Formato antigo (sha256 com salt fixo no código) — mantido só pra verificar contas
+  // criadas antes da migração. Nunca mais usado pra criar hash novo.
   return crypto.createHash('sha256').update('was-hub-salt-v1:' + password).digest('hex');
 }
 
 function verifyPassword(password, hash) {
-  return hashPassword(password) === hash;
+  if (typeof hash === 'string' && hash.startsWith('pbkdf2$')) {
+    const [, salt, expected] = hash.split('$');
+    const actual = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256').toString('hex');
+    try {
+      return crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
+    } catch (e) {
+      return false;
+    }
+  }
+  // Conta antiga (pré-migração): valida no formato legado. O caller deve re-hashear
+  // com hashPassword() e salvar assim que a senha bater, migrando a conta sozinha.
+  return legacyHashPassword(password) === hash;
 }
 
 function ensureUsersFromTeam(tenant) {
@@ -223,6 +243,46 @@ function ensureUsersFromTeam(tenant) {
 }
 
 const sessions = new Map(); // token -> { tenantId, userId, createdAt }
+
+// ---- Rate limit de login (por IP, em memória) — freia brute force de senha ----
+const loginAttempts = new Map(); // ip -> { count, firstFailAt, blockedUntil }
+const LOGIN_MAX_ATTEMPTS = 8;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_BLOCK_MS = 60 * 1000;
+
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return fwd.split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+function checkLoginRateLimit(key) {
+  const rec = loginAttempts.get(key);
+  if (!rec) return null;
+  if (rec.blockedUntil && rec.blockedUntil > Date.now()) {
+    return Math.ceil((rec.blockedUntil - Date.now()) / 1000);
+  }
+  return null;
+}
+
+function registerLoginFailure(key) {
+  const now = Date.now();
+  let rec = loginAttempts.get(key);
+  if (!rec || now - rec.firstFailAt > LOGIN_WINDOW_MS) {
+    rec = { count: 0, firstFailAt: now, blockedUntil: 0 };
+  }
+  rec.count += 1;
+  if (rec.count >= LOGIN_MAX_ATTEMPTS) {
+    rec.blockedUntil = now + LOGIN_BLOCK_MS;
+    rec.count = 0;
+    rec.firstFailAt = now;
+  }
+  loginAttempts.set(key, rec);
+}
+
+function registerLoginSuccess(key) {
+  loginAttempts.delete(key);
+}
 
 function parseCookies(req) {
   const header = req.headers.cookie;
@@ -250,13 +310,18 @@ function createSession(tenantId, userId) {
   return token;
 }
 
+// Em produção (Railway) o app roda atrás de HTTPS — cookie só trafega por HTTPS lá.
+// Em dev local (http://localhost) não força Secure, senão o navegador descarta o cookie.
+const IS_PRODUCTION = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_STATIC_URL);
+const COOKIE_SECURE_FLAG = IS_PRODUCTION ? '; Secure' : '';
+
 function setSessionCookie(res, token) {
   const maxAge = 60 * 60 * 24 * 30;
-  res.setHeader('Set-Cookie', `was_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
+  res.setHeader('Set-Cookie', `was_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${COOKIE_SECURE_FLAG}`);
 }
 
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'was_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  res.setHeader('Set-Cookie', `was_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${COOKIE_SECURE_FLAG}`);
 }
 
 function publicUser(u, tenant) {
@@ -399,11 +464,26 @@ function sendJSON(res, status, data) {
   res.end(body);
 }
 
+const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5MB — generoso pro maior payload do app (import/export), barra flood
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        aborted = true;
+        reject(new Error('payload_too_large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
+      if (aborted) return;
       const raw = Buffer.concat(chunks).toString('utf-8');
       if (!raw) return resolve({});
       try {
@@ -412,7 +492,7 @@ function readBody(req) {
         reject(e);
       }
     });
-    req.on('error', reject);
+    req.on('error', (e) => { if (!aborted) reject(e); });
   });
 }
 
@@ -518,6 +598,10 @@ async function handleAPI(req, res, pathname, query) {
     // ---- AUTH (login / logout / cadastro público / usuário atual) ----
     if (resource === 'auth') {
       if (resId === 'login' && method === 'POST') {
+        const rateKey = clientIp(req);
+        const block = checkLoginRateLimit(rateKey);
+        if (block) return sendJSON(res, 429, { error: `Muitas tentativas. Tente de novo em ${block}s.` });
+
         const body = await readBody(req);
         const email = (body.email || '').trim().toLowerCase();
         const password = body.password || '';
@@ -527,11 +611,38 @@ async function handleAPI(req, res, pathname, query) {
           if (u) { found = u; foundTenant = t; break; }
         }
         if (!found || !verifyPassword(password, found.passwordHash)) {
+          registerLoginFailure(rateKey);
           return sendJSON(res, 401, { error: 'E-mail/usuário ou senha inválidos' });
+        }
+        registerLoginSuccess(rateKey);
+        // Migra senhas criadas no formato antigo (hash sem salt por usuário) pro formato novo,
+        // de forma transparente, assim que a pessoa loga com sucesso.
+        if (typeof found.passwordHash === 'string' && !found.passwordHash.startsWith('pbkdf2$')) {
+          found.passwordHash = hashPassword(password);
+          saveDB(root);
         }
         const token = createSession(foundTenant.id, found.id);
         setSessionCookie(res, token);
         return sendJSON(res, 200, { user: publicUser(found, foundTenant) });
+      }
+      if (resId === 'password' && method === 'PUT') {
+        const session = getSession(req);
+        if (!session || !root.tenants[session.tenantId]) return sendJSON(res, 401, { error: 'Não autenticado' });
+        const tenant = root.tenants[session.tenantId];
+        const user = tenant.users.find((u) => u.id === session.userId);
+        if (!user) return sendJSON(res, 401, { error: 'Não autenticado' });
+        const body = await readBody(req);
+        const currentPassword = body.currentPassword || '';
+        const newPassword = body.newPassword || '';
+        if (!verifyPassword(currentPassword, user.passwordHash)) {
+          return sendJSON(res, 400, { error: 'Senha atual incorreta' });
+        }
+        if (newPassword.length < 4) {
+          return sendJSON(res, 400, { error: 'A nova senha precisa ter pelo menos 4 caracteres' });
+        }
+        user.passwordHash = hashPassword(newPassword);
+        saveDB(root);
+        return sendJSON(res, 200, { ok: true });
       }
       if (resId === 'logout' && method === 'POST') {
         const session = getSession(req);

@@ -378,6 +378,7 @@ function render() {
   if (state.page === 'dashboard') return renderDashboard(main);
   if (state.page === 'clientes') return renderClientes(main);
   if (state.page === 'cliente-detail') return renderClienteDetail(main);
+  if (state.page === 'briefing') return renderBriefingKanban(main);
   if (state.page === 'demandas') return renderDemandas(main);
   if (state.page === 'minhas-demandas') return renderMinhasDemandas(main);
   if (state.page === 'notificacoes') return renderNotificacoes(main);
@@ -1941,6 +1942,79 @@ function renderKanban(root, filtered) {
       demand.status = newStatus; // atualização otimista
       renderDemandas(document.getElementById('main'));
       await api('/demands/' + demandId, { method: 'PUT', body: JSON.stringify({ status: newStatus }) });
+    });
+  });
+}
+
+// ---------- Kanban de Briefing (Ideação → Aprovação cliente → Aprovado) ----------
+// Não é um recurso separado: reaproveita as próprias demandas nos 3 primeiros status do fluxo.
+// Ao cair em "Aprovado" o card já está com status a_fazer_design — aparece direto no
+// "A Fazer - Design" do kanban de produção (Demandas), visível pro time inteiro (inclusive social media).
+const BRIEFING_COLUMNS = [
+  { key: 'em_briefing', label: '💡 Ideação' },
+  { key: 'aprovacao_briefing', label: '📤 Aprovação do cliente' },
+  { key: 'a_fazer_design', label: '✅ Aprovado — no A Fazer do time' },
+];
+
+function renderBriefingKanban(main) {
+  const filtered = state.demands.filter((d) => BRIEFING_COLUMNS.some((c) => c.key === d.status));
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>🧠 Briefing</h1>
+        <p>Ideação e aprovação de conteúdo com o cliente. Ao aprovar, o card já cai no "A Fazer" do time de produção.</p>
+      </div>
+    </div>
+    <div class="kanban" id="briefing-kanban"></div>
+    <div class="board-footer" id="briefing-footer"></div>
+  `;
+  const kanban = document.getElementById('briefing-kanban');
+  kanban.innerHTML = `
+    <div class="stage-cols">
+      ${BRIEFING_COLUMNS.map((col) => {
+        const items = filtered.filter((d) => d.status === col.key);
+        return `
+          <div class="kanban-col" data-status="${col.key}">
+            <div class="col-head">
+              <h3>${col.label}</h3>
+              <span class="count">${items.length}</span>
+              <button class="col-add-btn" data-add="${col.key}" title="Novo briefing nesta coluna">+</button>
+            </div>
+            <div class="col-body" data-status="${col.key}">
+              ${items.map((d) => renderDemandCard(d)).join('')}
+              <button class="col-add-footer" data-add="${col.key}">+ Adicionar</button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+  document.getElementById('briefing-footer').innerHTML = `${filtered.length} briefing${filtered.length === 1 ? '' : 's'} no total`;
+
+  wireDemandCardEvents(kanban);
+
+  kanban.querySelectorAll('[data-add]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      openDemandModal(null, el.dataset.add);
+    };
+  });
+
+  kanban.querySelectorAll('.col-body').forEach((col) => {
+    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const demandId = e.dataTransfer.getData('text/plain');
+      const newStatus = col.dataset.status;
+      const demand = state.demands.find((d) => d.id === demandId);
+      if (!demand || demand.status === newStatus) return;
+      const justApproved = newStatus === 'a_fazer_design';
+      demand.status = newStatus; // atualização otimista
+      renderBriefingKanban(document.getElementById('main'));
+      await api('/demands/' + demandId, { method: 'PUT', body: JSON.stringify({ status: newStatus }) });
+      if (justApproved) toast('Aprovado! Já está no "A Fazer" do time de produção.', 'success');
     });
   });
 }

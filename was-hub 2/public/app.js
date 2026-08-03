@@ -205,6 +205,7 @@ const state = {
   currentUser: null,
   calendarDateFilter: 'both',
   minhasDemandasFilters: { period: 'all', customStart: '', customEnd: '', showDone: false },
+  users: [],
 };
 
 // ---------- API helpers ----------
@@ -226,7 +227,8 @@ async function api(path, opts) {
 }
 
 async function loadAll() {
-  const [clients, demands, team, automations, customColumns, viewPrefs, formatOptions, platformOptions, notifications] = await Promise.all([
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
+  const [clients, demands, team, automations, customColumns, viewPrefs, formatOptions, platformOptions, notifications, users] = await Promise.all([
     api('/clients'),
     api('/demands'),
     api('/team'),
@@ -236,6 +238,7 @@ async function loadAll() {
     api('/format-options'),
     api('/platform-options'),
     api('/notifications'),
+    isAdmin ? api('/users') : Promise.resolve([]),
   ]);
   state.clients = clients;
   state.demands = demands;
@@ -247,6 +250,7 @@ async function loadAll() {
   state.customFormatOptions = formatOptions || [];
   state.customPlatformOptions = platformOptions || [];
   state.mentionNotifications = notifications || [];
+  state.users = users || [];
 }
 
 function renderUserBadge() {
@@ -3316,14 +3320,131 @@ function renderAutomacoes(main) {
     <div class="tabs">
       <button class="tab-btn ${state.automacoesTab === 'regras' ? 'active' : ''}" id="tab-regras">Regras</button>
       <button class="tab-btn ${state.automacoesTab === 'equipe' ? 'active' : ''}" id="tab-equipe">Equipe</button>
+      ${isAdminUser() ? `<button class="tab-btn ${state.automacoesTab === 'acesso' ? 'active' : ''}" id="tab-acesso">Acesso</button>` : ''}
     </div>
     <div id="tab-content"></div>
   `;
   document.getElementById('tab-regras').onclick = () => { state.automacoesTab = 'regras'; renderAutomacoes(main); };
   document.getElementById('tab-equipe').onclick = () => { state.automacoesTab = 'equipe'; renderAutomacoes(main); };
+  const tabAcesso = document.getElementById('tab-acesso');
+  if (tabAcesso) tabAcesso.onclick = () => { state.automacoesTab = 'acesso'; renderAutomacoes(main); };
 
   if (state.automacoesTab === 'regras') renderAutomationRules(document.getElementById('tab-content'));
+  else if (state.automacoesTab === 'acesso' && isAdminUser()) renderAccessTab(document.getElementById('tab-content'));
   else renderTeamTab(document.getElementById('tab-content'));
+}
+
+function isAdminUser() {
+  return !!(state.currentUser && state.currentUser.role === 'admin');
+}
+
+function renderAccessTab(root) {
+  root.innerHTML = `
+    <div class="page-header" style="margin-bottom:14px">
+      <p style="color:var(--text-dim);font-size:12px;max-width:560px">Quem tem login no WAS Hub, qual o papel de cada um (admin vê tudo, membro só o que for liberado) e quais clientes cada pessoa enxerga.</p>
+      <button class="btn secondary small" id="btn-new-user">+ Novo usuário</button>
+    </div>
+    <div class="card-list" id="access-list"></div>
+  `;
+  document.getElementById('btn-new-user').onclick = () => openUserModal();
+  const list = document.getElementById('access-list');
+  if (!state.users.length) {
+    list.innerHTML = '<div class="empty-state">Nenhum usuário carregado.</div>';
+    return;
+  }
+  list.innerHTML = state.users.map((u) => {
+    const visLabel = u.visibleClientIds === 'all' ? 'Todos os clientes' : `${(u.visibleClientIds || []).length} cliente(s) liberado(s)`;
+    return `
+    <div class="client-card">
+      <div>
+        <div class="name">${escapeHtml(u.name)} <span class="tag tag-${u.role === 'admin' ? 'purple' : 'gray'}">${u.role === 'admin' ? 'Admin' : 'Membro'}</span> <span class="tag tag-${u.active ? 'green' : 'red'}">${u.active ? 'Ativo' : 'Acesso revogado'}</span></div>
+        <div class="meta">${escapeHtml(u.email || 'sem e-mail')} · ${escapeHtml(visLabel)}</div>
+      </div>
+      <div class="ct-actions">
+        <button class="icon-btn" data-edit-user="${u.id}" title="Editar">✏️</button>
+        ${u.active ? `<button class="icon-btn danger" data-revoke-user="${u.id}" title="Revogar acesso">🚫</button>` : ''}
+      </div>
+    </div>
+  `;
+  }).join('');
+  list.querySelectorAll('[data-edit-user]').forEach((btn) => {
+    btn.onclick = () => openUserModal(state.users.find((u) => u.id === btn.dataset.editUser));
+  });
+  list.querySelectorAll('[data-revoke-user]').forEach((btn) => {
+    btn.onclick = async () => {
+      const ok = await confirmDialog('Revogar o acesso desse usuário? Ele não vai mais conseguir entrar no WAS Hub.');
+      if (!ok) return;
+      try {
+        await api('/users/' + btn.dataset.revokeUser, { method: 'DELETE' });
+        await loadAll();
+        renderAutomacoes(document.getElementById('main'));
+        toast('Acesso revogado.', 'success');
+      } catch (e) {
+        toast(e.message || 'Não foi possível revogar o acesso.', 'error');
+      }
+    };
+  });
+}
+
+function openUserModal(user) {
+  const isEdit = !!user;
+  const clientsHtml = state.clients.map((c) => {
+    const checked = isEdit && Array.isArray(user.visibleClientIds) && user.visibleClientIds.includes(c.id);
+    return `<label class="chip"><input type="checkbox" class="f-client-vis" value="${c.id}" ${checked ? 'checked' : ''}/>${escapeHtml(c.name)}</label>`;
+  }).join('');
+  const allSelected = !isEdit || user.visibleClientIds === 'all';
+  showModal(`
+    <h2>${isEdit ? 'Editar usuário' : 'Novo usuário'}</h2>
+    <label>Nome</label>
+    <input type="text" id="f-name" value="${isEdit ? escapeHtml(user.name) : ''}" style="width:100%" ${isEdit ? 'disabled' : ''} />
+    <label style="margin-top:10px">E-mail</label>
+    <input type="email" id="f-email" value="${isEdit ? escapeHtml(user.email || '') : ''}" style="width:100%" />
+    <label style="margin-top:10px">${isEdit ? 'Redefinir senha (deixe em branco pra manter)' : 'Senha'}</label>
+    <input type="password" id="f-password" style="width:100%" />
+    <label style="margin-top:10px">Papel</label>
+    <select id="f-role" style="width:100%">
+      <option value="member" ${(!isEdit || user.role !== 'admin') ? 'selected' : ''}>Membro (vê só o que for liberado)</option>
+      <option value="admin" ${(isEdit && user.role === 'admin') ? 'selected' : ''}>Admin (vê e controla tudo)</option>
+    </select>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <input type="checkbox" id="f-all-clients" ${allSelected ? 'checked' : ''} style="width:auto" />
+      Acesso a todos os clientes
+    </label>
+    <div id="f-client-picker" class="checkbox-grid" style="margin-top:8px;display:${allSelected ? 'none' : 'grid'}">${clientsHtml}</div>
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Cancelar</button>
+      <button class="btn" id="btn-save">Salvar</button>
+    </div>
+  `);
+  document.getElementById('btn-cancel').onclick = closeModal;
+  document.getElementById('f-all-clients').onchange = (e) => {
+    document.getElementById('f-client-picker').style.display = e.target.checked ? 'none' : 'grid';
+  };
+  document.getElementById('btn-save').onclick = async () => {
+    const email = document.getElementById('f-email').value.trim();
+    const password = document.getElementById('f-password').value;
+    const role = document.getElementById('f-role').value;
+    const allClients = document.getElementById('f-all-clients').checked;
+    const visibleClientIds = allClients ? 'all' : Array.from(document.querySelectorAll('.f-client-vis:checked')).map((i) => i.value);
+    try {
+      if (isEdit) {
+        const payload = { email, role, visibleClientIds };
+        if (password) payload.newPassword = password;
+        await api('/users/' + user.id, { method: 'PUT', body: JSON.stringify(payload) });
+      } else {
+        const name = document.getElementById('f-name').value.trim();
+        if (!name) { toast('Informe o nome.', 'warn'); return; }
+        if (!password || password.length < 4) { toast('A senha precisa ter pelo menos 4 caracteres.', 'warn'); return; }
+        await api('/users', { method: 'POST', body: JSON.stringify({ name, email, password, role, visibleClientIds }) });
+      }
+      closeModal();
+      await loadAll();
+      renderAutomacoes(document.getElementById('main'));
+      toast(isEdit ? 'Usuário atualizado.' : 'Usuário criado.', 'success');
+    } catch (e) {
+      toast(e.message || 'Não foi possível salvar.', 'error');
+    }
+  };
 }
 
 function renderAutomationRules(root) {

@@ -206,6 +206,7 @@ const state = {
   calendarDateFilter: 'both',
   minhasDemandasFilters: { period: 'all', customStart: '', customEnd: '', showDone: false },
   users: [],
+  acompanhamentoTab: 'etapa',
 };
 
 // ---------- API helpers ----------
@@ -380,6 +381,7 @@ function render() {
   if (state.page === 'cliente-detail') return renderClienteDetail(main);
   if (state.page === 'briefing') return renderBriefingKanban(main);
   if (state.page === 'demandas') return renderDemandas(main);
+  if (state.page === 'acompanhamento') return renderAcompanhamento(main);
   if (state.page === 'minhas-demandas') return renderMinhasDemandas(main);
   if (state.page === 'notificacoes') return renderNotificacoes(main);
   if (state.page === 'automacoes') return renderAutomacoes(main);
@@ -704,6 +706,190 @@ function computeWorkloadHealth() {
     else if (overdue >= 1 || open >= 5 || urgent >= 2) level = 'warn';
     return { name, open, overdue, dueThisWeek, urgent, level };
   }).filter((w) => w.open > 0).sort((a, b) => b.open - a.open);
+}
+
+// Visão "por etapa/prazo": cruza cada cliente ativo com as 5 etapas do
+// pipeline (STAGES), mostrando quantas demandas estão paradas em cada
+// etapa e quantas já estão atrasadas ali. Base pro cadenciamento D-30/D-15/D-05 (task #97).
+function computeStageMatrix() {
+  const today = todayStr();
+  return state.clients
+    .filter((c) => c.status === 'ativo')
+    .map((c) => {
+      const demands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado');
+      const cells = KANBAN_STAGES.map((stage) => {
+        const inStage = demands.filter((d) => statusDef(d.status).stage === stage.key);
+        const overdue = inStage.filter((d) => d.prazo_final && d.prazo_final < today && !DONE_STATUSES.includes(d.status));
+        return { stageKey: stage.key, count: inStage.length, overdue: overdue.length };
+      });
+      const totalOverdue = cells.reduce((s, cell) => s + cell.overdue, 0);
+      const total = demands.length;
+      return { client: c, cells, totalOverdue, total };
+    })
+    .filter((row) => row.total > 0)
+    .sort((a, b) => b.totalOverdue - a.totalOverdue || b.total - a.total);
+}
+
+function renderAcompanhamento(main) {
+  if (!isAdminUser()) {
+    main.innerHTML = '<div class="empty-state">Essa área é restrita a administradores.</div>';
+    return;
+  }
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Acompanhamento</h1>
+        <p>Visão geral de tudo que está rodando — por etapa, por pessoa e por cliente</p>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn ${state.acompanhamentoTab === 'etapa' ? 'active' : ''}" id="tab-ac-etapa">Por etapa</button>
+      <button class="tab-btn ${state.acompanhamentoTab === 'pessoa' ? 'active' : ''}" id="tab-ac-pessoa">Por pessoa</button>
+      <button class="tab-btn ${state.acompanhamentoTab === 'cliente' ? 'active' : ''}" id="tab-ac-cliente">Por cliente</button>
+    </div>
+    <div id="tab-content"></div>
+  `;
+  document.getElementById('tab-ac-etapa').onclick = () => { state.acompanhamentoTab = 'etapa'; renderAcompanhamento(main); };
+  document.getElementById('tab-ac-pessoa').onclick = () => { state.acompanhamentoTab = 'pessoa'; renderAcompanhamento(main); };
+  document.getElementById('tab-ac-cliente').onclick = () => { state.acompanhamentoTab = 'cliente'; renderAcompanhamento(main); };
+
+  const root = document.getElementById('tab-content');
+  if (state.acompanhamentoTab === 'etapa') renderAcompanhamentoEtapa(root);
+  else if (state.acompanhamentoTab === 'pessoa') renderAcompanhamentoPessoa(root);
+  else renderAcompanhamentoCliente(root);
+}
+
+function renderAcompanhamentoEtapa(root) {
+  const rows = computeStageMatrix();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda em aberto ainda.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Quantas demandas cada cliente tem parada em cada etapa do pipeline. Números em vermelho = atrasadas naquela etapa.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Cliente</th>
+            ${KANBAN_STAGES.map((s) => `<th style="text-align:center">${escapeHtml(s.label)}</th>`).join('')}
+            <th style="text-align:center">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td><a href="#" data-open-client="${r.client.id}">${escapeHtml(r.client.name)}</a></td>
+              ${r.cells.map((cell) => `
+                <td style="text-align:center">
+                  ${cell.count === 0 ? '<span style="color:var(--text-dim)">—</span>' : (
+                    cell.overdue > 0
+                      ? `<span class="tag tag-red">${cell.count} (${cell.overdue} atrasada${cell.overdue === 1 ? '' : 's'})</span>`
+                      : `<span class="tag tag-gray">${cell.count}</span>`
+                  )}
+                </td>
+              `).join('')}
+              <td style="text-align:center;font-weight:600">${r.total}${r.totalOverdue > 0 ? ` <span class="tag tag-red">${r.totalOverdue} atrasada${r.totalOverdue === 1 ? '' : 's'}</span>` : ''}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll('[data-open-client]').forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.currentClientId = a.dataset.openClient;
+      state.page = 'cliente-detail';
+      render();
+    };
+  });
+}
+
+function renderAcompanhamentoPessoa(root) {
+  const rows = computeWorkloadHealth();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda em aberto ainda.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Carga de trabalho de cada pessoa do time: quanto tem aberto, atrasado, vencendo essa semana e urgente.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Pessoa</th>
+            <th style="text-align:center">Situação</th>
+            <th style="text-align:center">Em aberto</th>
+            <th style="text-align:center">Atrasadas</th>
+            <th style="text-align:center">Vencem essa semana</th>
+            <th style="text-align:center">Urgentes</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((w) => {
+            const meta = WORKLOAD_LEVEL_META[w.level];
+            return `
+            <tr>
+              <td>${escapeHtml(w.name)}</td>
+              <td style="text-align:center">${meta.dot} ${meta.label}</td>
+              <td style="text-align:center">${w.open}</td>
+              <td style="text-align:center">${w.overdue > 0 ? `<span class="tag tag-red">${w.overdue}</span>` : '—'}</td>
+              <td style="text-align:center">${w.dueThisWeek}</td>
+              <td style="text-align:center">${w.urgent > 0 ? `<span class="tag tag-orange">${w.urgent}</span>` : '—'}</td>
+            </tr>
+          `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderAcompanhamentoCliente(root) {
+  const rows = computeClientHealth();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda em aberto ainda.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Termômetro de cada cliente ativo: pipeline aberto, atrasos e itens esperando aprovação.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Cliente</th>
+            <th style="text-align:center">Situação</th>
+            <th style="text-align:center">Pipeline aberto</th>
+            <th style="text-align:center">Atrasadas</th>
+            <th style="text-align:center">Aguardando aprovação</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((h) => {
+            const meta = HEALTH_DEFS[h.status];
+            return `
+            <tr>
+              <td><a href="#" data-open-client="${h.client.id}">${escapeHtml(h.client.name)}</a></td>
+              <td style="text-align:center">${meta.icon} ${meta.label}</td>
+              <td style="text-align:center">${h.pipeline}</td>
+              <td style="text-align:center">${h.overdue > 0 ? `<span class="tag tag-red">${h.overdue}</span>` : '—'}</td>
+              <td style="text-align:center">${h.waiting > 0 ? `<span class="tag tag-yellow">${h.waiting}</span>` : '—'}</td>
+            </tr>
+          `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll('[data-open-client]').forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.currentClientId = a.dataset.openClient;
+      state.page = 'cliente-detail';
+      render();
+    };
+  });
 }
 
 function renderDashboard(main) {
@@ -3892,6 +4078,10 @@ function closeModal() {
     return; // api() já redireciona pra /login em caso de 401
   }
   renderUserBadge();
+  if (!isAdminUser()) {
+    const acompNav = document.querySelector('.nav-item[data-page="acompanhamento"]');
+    if (acompNav) acompNav.remove();
+  }
   await loadAll();
   render();
   startGlobalAutoRefresh();

@@ -97,6 +97,7 @@ function ensureTenantShape(t) {
   if (!t.notifications) t.notifications = [];
   if (!t.customFormatOptions) t.customFormatOptions = [];
   if (!t.customPlatformOptions) t.customPlatformOptions = [];
+  if (!t.cadenceNotified) t.cadenceNotified = {};
   t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; if (typeof d.capture_link !== 'string') d.capture_link = ''; });
 }
 
@@ -145,6 +146,63 @@ function maybeGenerateWeeklySummary(root, tenant) {
   });
   tenant.lastWeeklySummaryWeek = weekKey;
   saveDB(root);
+}
+
+// Cadência mensal WAS: até dia 05 cobra o fechamento mensal de cada cliente ativo;
+// entre dia 15-18 cobra o fechamento parcial (só relatório). Notifica os admins
+// (to: '__admins__' não bate com nenhum nome real, então só quem é admin vê —
+// admins enxergam todas as notificações independente do campo "to").
+// Roda no máximo uma vez por cliente/mês por tipo (tenant.cadenceNotified).
+function maybeGenerateCadenceAlerts(root, tenant) {
+  const hasMonthly = (tenant.automations || []).some((a) => a.active && a.kind === 'monthly_closing');
+  const hasPartial = (tenant.automations || []).some((a) => a.active && a.kind === 'partial_closing');
+  if (!hasMonthly && !hasPartial) return;
+  const now = new Date();
+  const day = now.getDate();
+  const monthKey = now.toISOString().slice(0, 7);
+  if (!tenant.cadenceNotified) tenant.cadenceNotified = {};
+  let changed = false;
+  const activeClients = (tenant.clients || []).filter((c) => c.status === 'ativo');
+
+  if (hasMonthly && day >= 1 && day <= 5) {
+    activeClients.forEach((c) => {
+      if (!tenant.cadenceNotified[c.id]) tenant.cadenceNotified[c.id] = {};
+      if (tenant.cadenceNotified[c.id].monthly === monthKey) return;
+      tenant.notifications.push({
+        id: id(),
+        type: 'monthly_closing',
+        to: '__admins__',
+        from: 'Automação',
+        message: `Fechamento mensal do cliente ${c.name}: prazo até dia 05.`,
+        demand_ids: [],
+        client_id: c.id,
+        read: false,
+        created_at: new Date().toISOString(),
+      });
+      tenant.cadenceNotified[c.id].monthly = monthKey;
+      changed = true;
+    });
+  }
+  if (hasPartial && day >= 15 && day <= 18) {
+    activeClients.forEach((c) => {
+      if (!tenant.cadenceNotified[c.id]) tenant.cadenceNotified[c.id] = {};
+      if (tenant.cadenceNotified[c.id].partial === monthKey) return;
+      tenant.notifications.push({
+        id: id(),
+        type: 'partial_closing',
+        to: '__admins__',
+        from: 'Automação',
+        message: `Fechamento parcial (relatório) do cliente ${c.name}: prazo até dia 18.`,
+        demand_ids: [],
+        client_id: c.id,
+        read: false,
+        created_at: new Date().toISOString(),
+      });
+      tenant.cadenceNotified[c.id].partial = monthKey;
+      changed = true;
+    });
+  }
+  if (changed) saveDB(root);
 }
 
 function loadDB() {
@@ -764,6 +822,7 @@ async function handleAPI(req, res, pathname, query) {
     const me = findUserBySession(db, session);
     if (me && isAccessRevoked(db, me)) return sendJSON(res, 403, { error: 'Seu acesso foi revogado. Fale com o administrador da sua empresa.' });
     maybeGenerateWeeklySummary(root, db);
+    maybeGenerateCadenceAlerts(root, db);
 
     // ---- CLIENTS ----
     if (resource === 'clients') {

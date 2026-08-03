@@ -557,7 +557,7 @@ function computeNotifications() {
 function myMentionNotifications() {
   const myName = state.currentUser && state.currentUser.name;
   if (!myName) return [];
-  return (state.mentionNotifications || []).filter((n) => n.to === myName);
+  return (state.mentionNotifications || []).filter((n) => n.to === myName || (n.to === '__admins__' && isAdminUser()));
 }
 
 function updateNavBadges() {
@@ -730,6 +730,33 @@ function computeStageMatrix() {
     .sort((a, b) => b.totalOverdue - a.totalOverdue || b.total - a.total);
 }
 
+// Cadência WAS: (1) tudo que vence nos próximos 15 dias já devia estar
+// pronto/programado pra postar; (2) tudo que vence entre 16-30 dias já devia
+// ter o briefing aprovado pelo cliente (fora das etapas 1-2). Regra do
+// Henrique: "dia 01 já temos que ter entregue os posts do dia 15, dia 15 os
+// do dia 30" + "calendário mensal aprovado com 30 dias de antecedência".
+function computeCadenceCompliance() {
+  const today = todayStr();
+  const d15 = addDaysStr(today, 15);
+  const d30 = addDaysStr(today, 30);
+  return state.clients
+    .filter((c) => c.status === 'ativo')
+    .map((c) => {
+      const demands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado');
+      const dueSoon = demands.filter((d) => d.prazo_final && d.prazo_final >= today && d.prazo_final <= d15);
+      const notReady = dueSoon.filter((d) => !DELIVERED_STATUSES.includes(d.status));
+      const dueLater = demands.filter((d) => d.prazo_final && d.prazo_final > d15 && d.prazo_final <= d30);
+      const notApproved = dueLater.filter((d) => statusDef(d.status).stage <= 2);
+      return {
+        client: c,
+        dueSoonTotal: dueSoon.length, notReadyCount: notReady.length,
+        dueLaterTotal: dueLater.length, notApprovedCount: notApproved.length,
+      };
+    })
+    .filter((r) => r.dueSoonTotal > 0 || r.dueLaterTotal > 0)
+    .sort((a, b) => (b.notReadyCount + b.notApprovedCount) - (a.notReadyCount + a.notApprovedCount));
+}
+
 function renderAcompanhamento(main) {
   if (!isAdminUser()) {
     main.innerHTML = '<div class="empty-state">Essa área é restrita a administradores.</div>';
@@ -746,17 +773,20 @@ function renderAcompanhamento(main) {
       <button class="tab-btn ${state.acompanhamentoTab === 'etapa' ? 'active' : ''}" id="tab-ac-etapa">Por etapa</button>
       <button class="tab-btn ${state.acompanhamentoTab === 'pessoa' ? 'active' : ''}" id="tab-ac-pessoa">Por pessoa</button>
       <button class="tab-btn ${state.acompanhamentoTab === 'cliente' ? 'active' : ''}" id="tab-ac-cliente">Por cliente</button>
+      <button class="tab-btn ${state.acompanhamentoTab === 'cadencia' ? 'active' : ''}" id="tab-ac-cadencia">Cadência</button>
     </div>
     <div id="tab-content"></div>
   `;
   document.getElementById('tab-ac-etapa').onclick = () => { state.acompanhamentoTab = 'etapa'; renderAcompanhamento(main); };
   document.getElementById('tab-ac-pessoa').onclick = () => { state.acompanhamentoTab = 'pessoa'; renderAcompanhamento(main); };
   document.getElementById('tab-ac-cliente').onclick = () => { state.acompanhamentoTab = 'cliente'; renderAcompanhamento(main); };
+  document.getElementById('tab-ac-cadencia').onclick = () => { state.acompanhamentoTab = 'cadencia'; renderAcompanhamento(main); };
 
   const root = document.getElementById('tab-content');
   if (state.acompanhamentoTab === 'etapa') renderAcompanhamentoEtapa(root);
   else if (state.acompanhamentoTab === 'pessoa') renderAcompanhamentoPessoa(root);
-  else renderAcompanhamentoCliente(root);
+  else if (state.acompanhamentoTab === 'cliente') renderAcompanhamentoCliente(root);
+  else renderAcompanhamentoCadencia(root);
 }
 
 function renderAcompanhamentoEtapa(root) {
@@ -878,6 +908,49 @@ function renderAcompanhamentoCliente(root) {
             </tr>
           `;
           }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll('[data-open-client]').forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.currentClientId = a.dataset.openClient;
+      state.page = 'cliente-detail';
+      render();
+    };
+  });
+}
+
+function renderAcompanhamentoCadencia(root) {
+  const rows = computeCadenceCompliance();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda com prazo nos próximos 30 dias.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Padrão WAS: tudo que vence nos próximos 15 dias já devia estar pronto pra postar; tudo que vence entre 16-30 dias já devia ter o briefing aprovado pelo cliente.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Cliente</th>
+            <th style="text-align:center">Vence em até 15 dias</th>
+            <th style="text-align:center">Ainda não prontas p/ postar</th>
+            <th style="text-align:center">Vence entre 16-30 dias</th>
+            <th style="text-align:center">Briefing ainda não aprovado</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td><a href="#" data-open-client="${r.client.id}">${escapeHtml(r.client.name)}</a></td>
+              <td style="text-align:center">${r.dueSoonTotal || '—'}</td>
+              <td style="text-align:center">${r.notReadyCount > 0 ? `<span class="tag tag-red">${r.notReadyCount}</span>` : (r.dueSoonTotal ? '<span class="tag tag-green">em dia</span>' : '—')}</td>
+              <td style="text-align:center">${r.dueLaterTotal || '—'}</td>
+              <td style="text-align:center">${r.notApprovedCount > 0 ? `<span class="tag tag-yellow">${r.notApprovedCount}</span>` : (r.dueLaterTotal ? '<span class="tag tag-green">em dia</span>' : '—')}</td>
+            </tr>
+          `).join('')}
         </tbody>
       </table>
     </div>
@@ -3515,6 +3588,8 @@ function renderNotificacoes(main) {
     client_comment: { icon: '💬', title: (m) => `${escapeHtml(m.from)} comentou` },
     weekly_summary: { icon: '🗓️', title: () => 'Resumo da semana' },
     assignment: { icon: '🧑‍💼', title: (m) => `${escapeHtml(m.from)} te atribuiu uma demanda` },
+    monthly_closing: { icon: '📕', title: () => 'Fechamento mensal pendente' },
+    partial_closing: { icon: '📗', title: () => 'Fechamento parcial pendente' },
   };
   const mentions = myMentionNotifications().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   const mentionHtml = mentions.map((m) => {
@@ -3581,7 +3656,13 @@ function renderNotificacoes(main) {
     row.onclick = () => {
       if (row.dataset.mentionId) api('/notifications/' + row.dataset.mentionId, { method: 'PUT', body: JSON.stringify({ read: true }) });
       const demand = state.demands.find((d) => d.id === row.dataset.open);
-      if (demand) openDemandModal(demand);
+      if (demand) return openDemandModal(demand);
+      const mention = mentions.find((m) => m.id === row.dataset.mentionId);
+      if (mention && mention.client_id) {
+        state.currentClientId = mention.client_id;
+        state.page = 'cliente-detail';
+        render();
+      }
     };
   });
 }
@@ -3764,6 +3845,34 @@ function renderAutomationRules(root) {
         </div>
       `;
     }
+    if (a.kind === 'monthly_closing') {
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">📕 <span class="tag tag-red">Fechamento mensal</span></div>
+            <div class="meta">Todo dia 1-5, avisa os admins do fechamento mensal pendente de cada cliente ativo</div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
+    if (a.kind === 'partial_closing') {
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">📗 <span class="tag tag-orange">Fechamento parcial</span></div>
+            <div class="meta">Todo dia 15-18, avisa os admins do fechamento parcial (relatório) pendente de cada cliente ativo</div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
     if (a.kind === 'deadline') {
       const fieldLabel = DEADLINE_FIELD_LABELS[a.trigger.field] || a.trigger.field;
       const daysLabel = DEADLINE_DAYS_LABELS[Number(a.trigger.daysBefore)] || `${a.trigger.daysBefore} dias antes`;
@@ -3854,6 +3963,8 @@ function openAutomationModal() {
       <option value="deadline">Alerta de prazo (avisar antes de vencer)</option>
       <option value="stage_alert">Alerta de fase (avisar equipe na mudança de status)</option>
       <option value="weekly_summary">Resumo semanal (toda segunda-feira)</option>
+      <option value="monthly_closing">Fechamento mensal (todo dia 1-5)</option>
+      <option value="partial_closing">Fechamento parcial (todo dia 15-18)</option>
     </select>
     <div id="auto-form-field">
       <label style="margin-top:14px">Quando</label>
@@ -3894,6 +4005,12 @@ function openAutomationModal() {
     <div id="auto-form-weekly" class="hidden">
       <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Toda segunda-feira, a Central de Notificações mostra um resumo com tudo que vence naquela semana, agrupado por dia. Não requer configuração adicional.</p>
     </div>
+    <div id="auto-form-monthly" class="hidden">
+      <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Do dia 1 ao dia 5 de cada mês, os admins recebem um aviso na Central de Notificações do fechamento mensal pendente de cada cliente ativo (uma vez por cliente/mês). Não requer configuração adicional.</p>
+    </div>
+    <div id="auto-form-partial" class="hidden">
+      <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Do dia 15 ao dia 18 de cada mês, os admins recebem um aviso na Central de Notificações do fechamento parcial (relatório) pendente de cada cliente ativo (uma vez por cliente/mês). Não requer configuração adicional.</p>
+    </div>
     <div class="modal-footer">
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
       <button class="btn" id="btn-save">Criar automação</button>
@@ -3916,6 +4033,8 @@ function openAutomationModal() {
     document.getElementById('auto-form-deadline').classList.toggle('hidden', kind !== 'deadline');
     document.getElementById('auto-form-stage').classList.toggle('hidden', kind !== 'stage_alert');
     document.getElementById('auto-form-weekly').classList.toggle('hidden', kind !== 'weekly_summary');
+    document.getElementById('auto-form-monthly').classList.toggle('hidden', kind !== 'monthly_closing');
+    document.getElementById('auto-form-partial').classList.toggle('hidden', kind !== 'partial_closing');
   };
 
   document.getElementById('btn-cancel').onclick = closeModal;
@@ -3938,6 +4057,10 @@ function openAutomationModal() {
       };
     } else if (kind === 'weekly_summary') {
       payload = { kind: 'weekly_summary', active: true, trigger: {}, action: {} };
+    } else if (kind === 'monthly_closing') {
+      payload = { kind: 'monthly_closing', active: true, trigger: {}, action: {} };
+    } else if (kind === 'partial_closing') {
+      payload = { kind: 'partial_closing', active: true, trigger: {}, action: {} };
     } else {
       const triggerField = document.getElementById('auto-trigger-field').value;
       const actionField = document.getElementById('auto-action-field').value;

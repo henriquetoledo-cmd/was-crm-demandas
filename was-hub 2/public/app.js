@@ -259,12 +259,48 @@ function renderUserBadge() {
       <div class="su-name">${escapeHtml(u.name)}</div>
       <div class="su-tenant">${escapeHtml(u.tenantName)}</div>
     </div>
+    <button class="su-password" id="btn-change-password" title="Alterar senha">🔒</button>
     <button class="su-logout" id="btn-logout" title="Sair">⏻</button>
   `;
   document.getElementById('btn-logout').onclick = async () => {
     await api('/auth/logout', { method: 'POST' });
     window.location.href = '/login';
   };
+  document.getElementById('btn-change-password').onclick = openChangePasswordModal;
+}
+
+function openChangePasswordModal() {
+  showModal(`
+    <h2>Alterar senha</h2>
+    <label>Senha atual</label>
+    <input type="password" id="f-current-password" style="width:100%" autocomplete="current-password" />
+    <label style="margin-top:10px">Nova senha</label>
+    <input type="password" id="f-new-password" style="width:100%" autocomplete="new-password" />
+    <label style="margin-top:10px">Confirmar nova senha</label>
+    <input type="password" id="f-confirm-password" style="width:100%" autocomplete="new-password" />
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Cancelar</button>
+      <button class="btn" id="btn-save">Salvar</button>
+    </div>
+  `);
+  document.getElementById('btn-cancel').onclick = closeModal;
+  const submit = async () => {
+    const currentPassword = document.getElementById('f-current-password').value;
+    const newPassword = document.getElementById('f-new-password').value;
+    const confirmPassword = document.getElementById('f-confirm-password').value;
+    if (!currentPassword || !newPassword) { toast('Preencha a senha atual e a nova senha.', 'warn'); return; }
+    if (newPassword.length < 4) { toast('A nova senha precisa ter pelo menos 4 caracteres.', 'warn'); return; }
+    if (newPassword !== confirmPassword) { toast('As senhas não coincidem.', 'warn'); return; }
+    try {
+      await api('/auth/password', { method: 'PUT', body: JSON.stringify({ currentPassword, newPassword }) });
+      closeModal();
+      toast('Senha alterada com sucesso.', 'success');
+    } catch (e) {
+      toast(e.message || 'Não foi possível alterar a senha.', 'error');
+    }
+  };
+  document.getElementById('btn-save').onclick = submit;
+  document.getElementById('f-confirm-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
 }
 
 function clientById(id) {
@@ -614,6 +650,30 @@ function computeWorkload(demandsForWorkload) {
   return Object.entries(byName).sort((a, b) => b[1] - a[1]);
 }
 
+// Sinaliza sobrecarga por pessoa: cruza nº de demandas abertas + atrasadas +
+// vencendo essa semana + urgentes. Thresholds pensados pra um time pequeno de
+// social media/design (ajustar aqui se o time crescer bastante).
+const WORKLOAD_LEVEL_META = {
+  ok: { label: 'Tranquilo', dot: '🟢' },
+  warn: { label: 'Atenção', dot: '🟡' },
+  over: { label: 'Sobrecarregado', dot: '🔴' },
+};
+function computeWorkloadHealth() {
+  const today = todayStr();
+  const weekEnd = addDaysStr(today, 7);
+  return activeTeamNames().map((name) => {
+    const mine = state.demands.filter((d) => d.responsible === name && !DONE_STATUSES.includes(d.status));
+    const open = mine.length;
+    const overdue = mine.filter((d) => d.prazo_final && d.prazo_final < today).length;
+    const dueThisWeek = mine.filter((d) => d.prazo_final && d.prazo_final >= today && d.prazo_final <= weekEnd).length;
+    const urgent = mine.filter((d) => d.priority === 'urgente').length;
+    let level = 'ok';
+    if (overdue >= 3 || open >= 9) level = 'over';
+    else if (overdue >= 1 || open >= 5 || urgent >= 2) level = 'warn';
+    return { name, open, overdue, dueThisWeek, urgent, level };
+  }).filter((w) => w.open > 0).sort((a, b) => b.open - a.open);
+}
+
 function renderDashboard(main) {
   const f = state.dashboardFilters;
   const dateRange = computeDateRange(f.period, f.customStart, f.customEnd);
@@ -638,6 +698,16 @@ function renderDashboard(main) {
   const waitingClient = scoped.filter((d) => d.status === 'em_aprovacao_cliente' || d.status === 'aprovacao_briefing').length;
   const urgent = pipeline.filter((d) => d.priority === 'urgente').length;
   const readyToPost = scoped.filter((d) => d.status === 'postar' || d.status === 'programado').length;
+
+  const upcomingCaptures = state.demands.filter((d) => {
+    if (f.clientId && d.client_id !== f.clientId) return false;
+    if (f.responsible && d.responsible !== f.responsible) return false;
+    if (DONE_STATUSES.includes(d.status)) return false;
+    return d.needs_capture !== false && d.capture_date && d.capture_date >= todayStr();
+  }).sort((a, b) => (a.capture_date < b.capture_date ? -1 : 1));
+
+  const workloadHealth = computeWorkloadHealth();
+  const maxWorkloadOpen = workloadHealth.length ? Math.max(...workloadHealth.map((w) => w.open)) : 0;
 
   const formatCounts = (() => {
     const counts = {};
@@ -697,6 +767,26 @@ function renderDashboard(main) {
       <div class="stat-card"><div class="num" style="color:${urgent ? 'var(--red)' : 'var(--text)'}">${urgent}</div><div class="label">Prioridade urgente</div></div>
       <div class="stat-card"><div class="num" style="color:${waitingClient ? 'var(--yellow)' : 'var(--text)'}">${waitingClient}</div><div class="label">Aguardando cliente</div></div>
       <div class="stat-card"><div class="num">${readyToPost}</div><div class="label">Prontas p/ postar</div></div>
+    </div>
+
+    <div class="dash-panel" style="margin-bottom:20px">
+      <h2>🎬 Próximas captações</h2>
+      <p class="dash-panel-sub">Agenda de captação por ordem de data, a partir de hoje</p>
+      ${upcomingCaptures.length ? `
+        <div class="notif-list">
+          ${upcomingCaptures.slice(0, 8).map((d) => `
+            <div class="notif-row" data-open-capture="${d.id}">
+              <span class="notif-icon">🎬</span>
+              <div class="notif-body">
+                <div class="notif-title">${escapeHtml(d.title)}</div>
+                <div class="notif-meta">${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</div>
+              </div>
+              <div class="sub" style="flex-shrink:0">${formatDateBR(d.capture_date)}</div>
+            </div>
+          `).join('')}
+        </div>
+        ${upcomingCaptures.length > 8 ? `<p class="dash-panel-sub" style="margin:10px 0 0">+${upcomingCaptures.length - 8} outra${upcomingCaptures.length - 8 === 1 ? '' : 's'} captação${upcomingCaptures.length - 8 === 1 ? '' : 'ões'} agendada${upcomingCaptures.length - 8 === 1 ? '' : 's'}</p>` : ''}
+      ` : '<div class="empty-state">Nenhuma captação agendada no momento.</div>'}
     </div>
 
     <div class="dash-panel dash-panel-wide" style="margin-bottom:20px">
@@ -767,17 +857,21 @@ function renderDashboard(main) {
 
       <div class="dash-panel">
         <h2>Carga de trabalho por responsável</h2>
-        <p class="dash-panel-sub">Quem está com mais demandas em aberto agora</p>
-        ${workload.length ? `
+        <p class="dash-panel-sub">Quem está com mais demandas em aberto — e quem pode estar sobrecarregado</p>
+        ${workloadHealth.length ? `
           <div class="format-bars">
-            ${workload.map(([name, count]) => `
-              <div class="format-bar-row">
-                <span class="format-bar-label">${escapeHtml(name)}</span>
-                <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxWorkload ? Math.round((count / maxWorkload) * 100) : 0}%"></div></div>
-                <span class="format-bar-count">${count}</span>
+            ${workloadHealth.map((w) => `
+              <div class="format-bar-row" title="${w.overdue} atrasada${w.overdue === 1 ? '' : 's'} · ${w.dueThisWeek} vencendo essa semana${w.urgent ? ' · ' + w.urgent + ' urgente' + (w.urgent === 1 ? '' : 's') : ''}">
+                <span class="format-bar-label">${WORKLOAD_LEVEL_META[w.level].dot} ${escapeHtml(w.name)}</span>
+                <div class="format-bar-track"><div class="format-bar-fill workload-${w.level}" style="width:${maxWorkloadOpen ? Math.round((w.open / maxWorkloadOpen) * 100) : 0}%"></div></div>
+                <span class="format-bar-count">${w.open}</span>
               </div>
             `).join('')}
           </div>
+          <p class="dash-panel-sub" style="margin:12px 0 0">
+            ${WORKLOAD_LEVEL_META.ok.dot} Tranquilo &nbsp; ${WORKLOAD_LEVEL_META.warn.dot} Atenção &nbsp; ${WORKLOAD_LEVEL_META.over.dot} Sobrecarregado
+            ${workloadHealth.some((w) => w.level === 'over') ? ` — <strong style="color:var(--red)">${workloadHealth.filter((w) => w.level === 'over').map((w) => w.name).join(', ')}</strong> precisa de ajuda ou redistribuição de demandas` : ''}
+          </p>
         ` : '<div class="empty-state">Nenhuma demanda em aberto com responsável definido.</div>'}
       </div>
     </div>
@@ -836,6 +930,12 @@ function renderDashboard(main) {
     state.dashboardFilters = { clientId: '', responsible: '', period: 'all', customStart: '', customEnd: '' };
     renderDashboard(main);
   };
+  main.querySelectorAll('[data-open-capture]').forEach((el) => {
+    el.onclick = () => {
+      const demand = state.demands.find((d) => d.id === el.dataset.openCapture);
+      if (demand) openDemandModal(demand);
+    };
+  });
   main.querySelectorAll('.health-row[data-open]').forEach((el) => {
     el.onclick = async () => {
       state.currentClientId = el.dataset.open;
@@ -847,27 +947,24 @@ function renderDashboard(main) {
       render();
     };
   });
-  startDashboardAutoRefresh();
 }
 
-// Mantém o Dashboard vivo: enquanto a página estiver aberta, busca dados novos
-// periodicamente (pra refletir o que outra pessoa do time mexeu). Some sozinho
-// ao sair da página.
-let dashboardAutoRefreshTimer = null;
-function startDashboardAutoRefresh() {
-  if (dashboardAutoRefreshTimer) return;
-  dashboardAutoRefreshTimer = setInterval(async () => {
-    if (state.page !== 'dashboard') {
-      clearInterval(dashboardAutoRefreshTimer);
-      dashboardAutoRefreshTimer = null;
-      return;
-    }
-    if (document.querySelector('.modal-backdrop')) return; // não interrompe quem está editando
+// Notificações e telas em tempo real: enquanto o app estiver aberto, busca dados
+// novos periodicamente (pra refletir o que outra pessoa do time mexeu no kanban,
+// na tabela ou em qualquer demanda) e atualiza o badge + a tela atual sozinho.
+const AUTO_REFRESH_PAGES = ['dashboard', 'demandas', 'notificacoes', 'minhas-demandas', 'cliente-detail'];
+function startGlobalAutoRefresh() {
+  setInterval(async () => {
+    if (document.querySelector('.modal-backdrop')) return; // não interrompe quem está editando um card
+    const active = document.activeElement;
+    if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return; // não interrompe quem está digitando/filtrando
+    if (document.querySelector('.demand-card.dragging')) return; // não interrompe um drag em andamento
     try {
       await loadAll();
-      if (state.page === 'dashboard') renderDashboard(document.getElementById('main'));
+      if (AUTO_REFRESH_PAGES.includes(state.page)) render();
+      else updateNavBadges();
     } catch (e) { /* silencioso — tenta de novo no próximo ciclo */ }
-  }, 15000);
+  }, 12000);
 }
 
 // ---------- Clientes (galeria estilo Notion) ----------
@@ -3574,4 +3671,5 @@ function closeModal() {
   renderUserBadge();
   await loadAll();
   render();
+  startGlobalAutoRefresh();
 })();

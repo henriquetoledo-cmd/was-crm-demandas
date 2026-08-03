@@ -237,9 +237,48 @@ function ensureUsersFromTeam(tenant) {
       passwordHash: hashPassword('1234'),
       role: (t.roles || []).includes('Coringa') ? 'admin' : 'member',
       team_member_id: t.id,
+      visibleClientIds: 'all',
       created_at: new Date().toISOString(),
     });
   });
+  // migração: usuários criados antes do campo de visibilidade existir ganham acesso a tudo,
+  // preservando o comportamento atual até um admin restringir explicitamente.
+  tenant.users.forEach((u) => {
+    if (u.visibleClientIds === undefined) u.visibleClientIds = 'all';
+  });
+}
+
+// ---------- Permissões ----------
+function isAdminUser(user) {
+  return !!user && user.role === 'admin';
+}
+
+function findUserBySession(tenant, session) {
+  if (!session) return null;
+  return tenant.users.find((u) => u.id === session.userId) || null;
+}
+
+// Bloqueia login/uso se o funcionário vinculado foi desativado, removido da equipe,
+// ou se a conta foi explicitamente marcada como revogada (ex.: time excluído).
+function isAccessRevoked(tenant, user) {
+  if (!user) return false;
+  if (user.revokedByTeamDelete) return true;
+  if (!user.team_member_id) return false;
+  const member = tenant.team.find((t) => t.id === user.team_member_id);
+  if (!member) return true; // funcionário foi removido da equipe — acesso não deve continuar valendo
+  return member.active === false;
+}
+
+function filterClientsForUser(clients, user) {
+  if (!user || isAdminUser(user) || user.visibleClientIds === 'all' || !Array.isArray(user.visibleClientIds)) return clients;
+  const allowed = new Set(user.visibleClientIds);
+  return clients.filter((c) => allowed.has(c.id));
+}
+
+function filterDemandsForUser(demands, user) {
+  if (!user || isAdminUser(user) || user.visibleClientIds === 'all' || !Array.isArray(user.visibleClientIds)) return demands;
+  const allowed = new Set(user.visibleClientIds);
+  return demands.filter((d) => allowed.has(d.client_id));
 }
 
 const sessions = new Map(); // token -> { tenantId, userId, createdAt }
@@ -325,7 +364,7 @@ function clearSessionCookie(res) {
 }
 
 function publicUser(u, tenant) {
-  return { id: u.id, name: u.name, email: u.email, role: u.role, tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, tenantPlan: tenant.plan };
+  return { id: u.id, name: u.name, email: u.email, role: u.role, visibleClientIds: u.visibleClientIds === undefined ? 'all' : u.visibleClientIds, tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, tenantPlan: tenant.plan };
 }
 
 function id() {
@@ -614,6 +653,10 @@ async function handleAPI(req, res, pathname, query) {
           registerLoginFailure(rateKey);
           return sendJSON(res, 401, { error: 'E-mail/usuário ou senha inválidos' });
         }
+        if (isAccessRevoked(foundTenant, found)) {
+          registerLoginFailure(rateKey);
+          return sendJSON(res, 403, { error: 'Seu acesso foi revogado. Fale com o administrador da sua empresa.' });
+        }
         registerLoginSuccess(rateKey);
         // Migra senhas criadas no formato antigo (hash sem salt por usuário) pro formato novo,
         // de forma transparente, assim que a pessoa loga com sucesso.
@@ -699,11 +742,13 @@ async function handleAPI(req, res, pathname, query) {
       return sendJSON(res, 401, { error: 'Não autenticado' });
     }
     const db = root.tenants[session.tenantId];
+    const me = findUserBySession(db, session);
+    if (me && isAccessRevoked(db, me)) return sendJSON(res, 403, { error: 'Seu acesso foi revogado. Fale com o administrador da sua empresa.' });
     maybeGenerateWeeklySummary(root, db);
 
     // ---- CLIENTS ----
     if (resource === 'clients') {
-      if (method === 'GET' && !resId) return sendJSON(res, 200, db.clients);
+      if (method === 'GET' && !resId) return sendJSON(res, 200, filterClientsForUser(db.clients, me));
       if (method === 'POST') {
         const body = await readBody(req);
         const client = {
@@ -744,6 +789,7 @@ async function handleAPI(req, res, pathname, query) {
     // ---- TEAM (equipe WAS) ----
     if (resource === 'team') {
       if (method === 'GET' && !resId) return sendJSON(res, 200, db.team);
+      if (method !== 'GET' && !isAdminUser(me)) return sendJSON(res, 403, { error: 'Apenas administradores podem alterar a equipe.' });
       if (method === 'POST') {
         const body = await readBody(req);
         const member = {
@@ -767,6 +813,90 @@ async function handleAPI(req, res, pathname, query) {
       }
       if (method === 'DELETE' && resId) {
         db.team = db.team.filter((t) => t.id !== resId);
+        // remove o funcionário do time NÃO deve deixar a conta de login órfã e ativa —
+        // revoga o acesso de qualquer usuário vinculado a esse membro da equipe.
+        db.users.forEach((u) => { if (u.team_member_id === resId) u.revokedByTeamDelete = true; });
+        saveDB(root);
+        return sendJSON(res, 200, { ok: true });
+      }
+    }
+
+    // ---- USERS (contas de login, gestão de acesso — só admin) ----
+    if (resource === 'users') {
+      if (!isAdminUser(me)) return sendJSON(res, 403, { error: 'Apenas administradores podem gerenciar usuários.' });
+
+      if (method === 'GET' && !resId) {
+        const list = db.users.map((u) => {
+          const member = db.team.find((t) => t.id === u.team_member_id);
+          return {
+            id: u.id, name: u.name, email: u.email, role: u.role,
+            visibleClientIds: u.visibleClientIds === undefined ? 'all' : u.visibleClientIds,
+            active: member ? member.active !== false : true,
+            team_member_id: u.team_member_id,
+            created_at: u.created_at,
+          };
+        });
+        return sendJSON(res, 200, list);
+      }
+
+      if (method === 'POST' && !resId) {
+        const body = await readBody(req);
+        const name = (body.name || '').trim();
+        const email = (body.email || '').trim().toLowerCase();
+        const password = body.password || '';
+        if (!name || !password) return sendJSON(res, 400, { error: 'Nome e senha são obrigatórios.' });
+        if (password.length < 4) return sendJSON(res, 400, { error: 'A senha precisa ter pelo menos 4 caracteres.' });
+        if (email) {
+          const emailTaken = Object.values(root.tenants).some((t) => t.users.some((u) => (u.email || '').trim().toLowerCase() === email));
+          if (emailTaken) return sendJSON(res, 400, { error: 'Já existe uma conta com esse e-mail.' });
+        }
+        const roles = Array.isArray(body.roles) ? body.roles : [];
+        const member = { id: id(), name, roles, active: true, created_at: new Date().toISOString() };
+        db.team.push(member);
+        const newUser = {
+          id: id(), name, email: email || null, passwordHash: hashPassword(password),
+          role: body.role === 'admin' ? 'admin' : 'member',
+          team_member_id: member.id,
+          visibleClientIds: body.visibleClientIds === 'all' ? 'all' : (Array.isArray(body.visibleClientIds) ? body.visibleClientIds : 'all'),
+          created_at: new Date().toISOString(),
+        };
+        db.users.push(newUser);
+        saveDB(root);
+        return sendJSON(res, 201, { id: newUser.id, name: newUser.name, email: newUser.email, role: newUser.role, visibleClientIds: newUser.visibleClientIds, active: true, team_member_id: member.id });
+      }
+
+      if (method === 'PUT' && resId) {
+        const idx = db.users.findIndex((u) => u.id === resId);
+        if (idx === -1) return sendJSON(res, 404, { error: 'Usuário não encontrado' });
+        const target = db.users[idx];
+        const body = await readBody(req);
+        if (body.email !== undefined) target.email = (body.email || '').trim().toLowerCase() || null;
+        if (body.role !== undefined) target.role = body.role === 'admin' ? 'admin' : 'member';
+        if (body.visibleClientIds !== undefined) {
+          target.visibleClientIds = body.visibleClientIds === 'all' ? 'all' : (Array.isArray(body.visibleClientIds) ? body.visibleClientIds : 'all');
+        }
+        if (body.newPassword) {
+          if (body.newPassword.length < 4) return sendJSON(res, 400, { error: 'A nova senha precisa ter pelo menos 4 caracteres.' });
+          target.passwordHash = hashPassword(body.newPassword);
+        }
+        if (body.active !== undefined) {
+          if (target.id === me.id && body.active === false) {
+            return sendJSON(res, 400, { error: 'Você não pode revogar o próprio acesso.' });
+          }
+          const member = db.team.find((t) => t.id === target.team_member_id);
+          if (member) member.active = !!body.active;
+        }
+        saveDB(root);
+        const member = db.team.find((t) => t.id === target.team_member_id);
+        return sendJSON(res, 200, { id: target.id, name: target.name, email: target.email, role: target.role, visibleClientIds: target.visibleClientIds, active: member ? member.active !== false : true, team_member_id: target.team_member_id });
+      }
+
+      if (method === 'DELETE' && resId) {
+        if (resId === me.id) return sendJSON(res, 400, { error: 'Você não pode revogar o próprio acesso.' });
+        const target = db.users.find((u) => u.id === resId);
+        if (!target) return sendJSON(res, 404, { error: 'Usuário não encontrado' });
+        const member = db.team.find((t) => t.id === target.team_member_id);
+        if (member) member.active = false;
         saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
@@ -858,7 +988,7 @@ async function handleAPI(req, res, pathname, query) {
     // ---- DEMANDS ----
     if (resource === 'demands') {
       if (method === 'GET' && !resId) {
-        let list = db.demands;
+        let list = filterDemandsForUser(db.demands, me);
         if (query.client_id) list = list.filter((d) => d.client_id === query.client_id);
         return sendJSON(res, 200, list);
       }
@@ -963,7 +1093,12 @@ async function handleAPI(req, res, pathname, query) {
 
     // ---- NOTIFICAÇÕES (menções em comentários) ----
     if (resource === 'notifications') {
-      if (method === 'GET' && !resId) return sendJSON(res, 200, db.notifications || []);
+      if (method === 'GET' && !resId) {
+        const all = db.notifications || [];
+        if (isAdminUser(me)) return sendJSON(res, 200, all);
+        const myName = me ? me.name : null;
+        return sendJSON(res, 200, all.filter((n) => n.to === myName));
+      }
       if (method === 'PUT' && resId) {
         const idx = (db.notifications || []).findIndex((n) => n.id === resId);
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });

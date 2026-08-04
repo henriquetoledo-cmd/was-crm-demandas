@@ -68,6 +68,11 @@ const DEFAULT_PAGES = [
   { title: 'Relatórios de Desempenho', type: 'page' },
 ];
 
+// Subpastas de "Relatórios de Desempenho" (fechamento mensal): uma pasta por ano,
+// com uma subpágina por mês, pra organizar onde cada fechamento mensal fica salvo.
+const MONTH_FOLDER_NAMES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+const REPORT_FOLDER_YEARS = [2026];
+
 const STATUS_RENAME = { nao_utilizado: 'arquivado' };
 
 // ---------- Persistência ----------
@@ -243,6 +248,7 @@ function loadDB() {
   Object.values(db.tenants).forEach((t) => {
     ensureTenantShape(t);
     ensureDefaultPagesForAllClients(t);
+    ensureReportMonthFolders(t);
     migrateStatuses(t);
     ensureUsersFromTeam(t); // garante login individual (senha padrão 1234) pra cada membro da equipe
   });
@@ -536,6 +542,31 @@ function ensureDefaultPagesForAllClients(db) {
       if (p.client_id === c.id && p.title === 'Calendário de Entrega' && p.type !== 'calendar') {
         p.type = 'calendar';
       }
+    });
+  });
+}
+
+function ensureReportMonthFolders(db) {
+  db.clients.forEach((c) => {
+    const reportsPage = db.pages.find((p) => p.client_id === c.id && !p.parent_id && p.title === 'Relatórios de Desempenho');
+    if (!reportsPage) return;
+    REPORT_FOLDER_YEARS.forEach((year) => {
+      let yearPage = db.pages.find((p) => p.client_id === c.id && p.parent_id === reportsPage.id && p.title === String(year));
+      if (!yearPage) {
+        yearPage = {
+          id: id(), client_id: c.id, parent_id: reportsPage.id, type: 'page', title: String(year),
+          content: '', order: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        };
+        db.pages.push(yearPage);
+      }
+      const existingMonthTitles = new Set(db.pages.filter((p) => p.client_id === c.id && p.parent_id === yearPage.id).map((p) => p.title));
+      MONTH_FOLDER_NAMES.forEach((label, i) => {
+        if (existingMonthTitles.has(label)) return;
+        db.pages.push({
+          id: id(), client_id: c.id, parent_id: yearPage.id, type: 'page', title: label,
+          content: '', order: i, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        });
+      });
     });
   });
 }
@@ -978,6 +1009,56 @@ async function handleAPI(req, res, pathname, query) {
         saveDB(root);
         return sendJSON(res, 200, { ok: true });
       }
+    }
+
+    // ---- IMPORT (histórico real do CSV do Notion — arquivo bundlado no deploy, só admin, one-off) ----
+    if (resource === 'import' && resId === 'notion-demands') {
+      if (!isAdminUser(me)) return sendJSON(res, 403, { error: 'Apenas administradores podem importar dados.' });
+      if (method !== 'POST') return sendJSON(res, 404, { error: 'Rota não encontrada' });
+      const importPath = path.join(__dirname, 'import-demands.json');
+      if (!fs.existsSync(importPath)) return sendJSON(res, 404, { error: 'Arquivo import-demands.json não encontrado no servidor.' });
+      let raw;
+      try {
+        raw = JSON.parse(fs.readFileSync(importPath, 'utf-8'));
+      } catch (e) {
+        return sendJSON(res, 500, { error: 'Falha ao ler import-demands.json: ' + e.message });
+      }
+      const body = await readBody(req);
+      const replaceExisting = body.replace_existing === true;
+      const removedCount = replaceExisting ? db.demands.length : 0;
+      if (replaceExisting) db.demands = [];
+      let created = 0;
+      raw.forEach((r) => {
+        if (!r.client_id) return;
+        db.demands.push({
+          id: id(),
+          client_id: r.client_id,
+          title: r.title || 'Sem título',
+          description: '',
+          briefing: '',
+          format: Array.isArray(r.format) ? r.format : [],
+          platform: Array.isArray(r.platform) ? r.platform : [],
+          status: r.status || 'em_briefing',
+          needs_capture: !!r.needs_capture,
+          capture_date: '',
+          capture_link: '',
+          prazo_designer: r.prazo_designer || '',
+          prazo_final: r.prazo_final || '',
+          responsible: r.responsible || '',
+          priority: r.priority || 'normal',
+          forecast: r.forecast || 'prevista',
+          refacao: r.refacao || '',
+          visible_to_client: false,
+          link: '',
+          custom_fields: {},
+          comments: [],
+          created_at: r.created_at || new Date().toISOString(),
+          imported_from: r.imported_from || 'notion_csv',
+        });
+        created++;
+      });
+      saveDB(root);
+      return sendJSON(res, 200, { ok: true, created, removed: removedCount, total: db.demands.length });
     }
 
     // ---- AUTOMATIONS ----

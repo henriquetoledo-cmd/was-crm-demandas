@@ -115,6 +115,36 @@ function addDaysStr(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// Calcula o intervalo [start, end] (strings ISO yyyy-mm-dd) para um período do dashboard.
+// Retorna null quando é "todo o período" (sem filtro).
+function computeDateRange(period, customStart, customEnd) {
+  const today = todayStr();
+  if (period === 'this_month') {
+    const [y, m] = today.split('-');
+    const start = `${y}-${m}-01`;
+    const lastDay = new Date(Number(y), Number(m), 0).getDate();
+    const end = `${y}-${m}-${String(lastDay).padStart(2, '0')}`;
+    return { start, end };
+  }
+  if (period === 'last_month') {
+    const d = new Date(today + 'T00:00:00');
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const lastDay = new Date(y, d.getMonth() + 1, 0).getDate();
+    return { start: `${y}-${m}-01`, end: `${y}-${m}-${String(lastDay).padStart(2, '0')}` };
+  }
+  if (period === 'next_30') {
+    return { start: today, end: addDaysStr(today, 30) };
+  }
+  if (period === 'custom') {
+    if (!customStart && !customEnd) return null;
+    return { start: customStart || '0000-01-01', end: customEnd || '9999-12-31' };
+  }
+  return null; // 'all'
+}
+
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -171,9 +201,12 @@ const state = {
   tableSelection: null,
   tableClipboard: null,
   tableUndoStack: [],
-  dashboardFilters: { clientId: '', responsible: '' },
+  dashboardFilters: { clientId: '', responsible: '', period: 'all', customStart: '', customEnd: '' },
   currentUser: null,
   calendarDateFilter: 'both',
+  minhasDemandasFilters: { period: 'all', customStart: '', customEnd: '', showDone: false },
+  users: [],
+  acompanhamentoTab: 'etapa',
 };
 
 // ---------- API helpers ----------
@@ -195,7 +228,8 @@ async function api(path, opts) {
 }
 
 async function loadAll() {
-  const [clients, demands, team, automations, customColumns, viewPrefs, formatOptions, platformOptions, notifications] = await Promise.all([
+  const isAdmin = state.currentUser && state.currentUser.role === 'admin';
+  const [clients, demands, team, automations, customColumns, viewPrefs, formatOptions, platformOptions, notifications, users] = await Promise.all([
     api('/clients'),
     api('/demands'),
     api('/team'),
@@ -205,6 +239,7 @@ async function loadAll() {
     api('/format-options'),
     api('/platform-options'),
     api('/notifications'),
+    isAdmin ? api('/users') : Promise.resolve([]),
   ]);
   state.clients = clients;
   state.demands = demands;
@@ -216,6 +251,7 @@ async function loadAll() {
   state.customFormatOptions = formatOptions || [];
   state.customPlatformOptions = platformOptions || [];
   state.mentionNotifications = notifications || [];
+  state.users = users || [];
 }
 
 function renderUserBadge() {
@@ -228,12 +264,48 @@ function renderUserBadge() {
       <div class="su-name">${escapeHtml(u.name)}</div>
       <div class="su-tenant">${escapeHtml(u.tenantName)}</div>
     </div>
+    <button class="su-password" id="btn-change-password" title="Alterar senha">🔒</button>
     <button class="su-logout" id="btn-logout" title="Sair">⏻</button>
   `;
   document.getElementById('btn-logout').onclick = async () => {
     await api('/auth/logout', { method: 'POST' });
     window.location.href = '/login';
   };
+  document.getElementById('btn-change-password').onclick = openChangePasswordModal;
+}
+
+function openChangePasswordModal() {
+  showModal(`
+    <h2>Alterar senha</h2>
+    <label>Senha atual</label>
+    <input type="password" id="f-current-password" style="width:100%" autocomplete="current-password" />
+    <label style="margin-top:10px">Nova senha</label>
+    <input type="password" id="f-new-password" style="width:100%" autocomplete="new-password" />
+    <label style="margin-top:10px">Confirmar nova senha</label>
+    <input type="password" id="f-confirm-password" style="width:100%" autocomplete="new-password" />
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Cancelar</button>
+      <button class="btn" id="btn-save">Salvar</button>
+    </div>
+  `);
+  document.getElementById('btn-cancel').onclick = closeModal;
+  const submit = async () => {
+    const currentPassword = document.getElementById('f-current-password').value;
+    const newPassword = document.getElementById('f-new-password').value;
+    const confirmPassword = document.getElementById('f-confirm-password').value;
+    if (!currentPassword || !newPassword) { toast('Preencha a senha atual e a nova senha.', 'warn'); return; }
+    if (newPassword.length < 4) { toast('A nova senha precisa ter pelo menos 4 caracteres.', 'warn'); return; }
+    if (newPassword !== confirmPassword) { toast('As senhas não coincidem.', 'warn'); return; }
+    try {
+      await api('/auth/password', { method: 'PUT', body: JSON.stringify({ currentPassword, newPassword }) });
+      closeModal();
+      toast('Senha alterada com sucesso.', 'success');
+    } catch (e) {
+      toast(e.message || 'Não foi possível alterar a senha.', 'error');
+    }
+  };
+  document.getElementById('btn-save').onclick = submit;
+  document.getElementById('f-confirm-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
 }
 
 function clientById(id) {
@@ -307,7 +379,10 @@ function render() {
   if (state.page === 'dashboard') return renderDashboard(main);
   if (state.page === 'clientes') return renderClientes(main);
   if (state.page === 'cliente-detail') return renderClienteDetail(main);
+  if (state.page === 'briefing') return renderBriefingKanban(main);
   if (state.page === 'demandas') return renderDemandas(main);
+  if (state.page === 'acompanhamento') return renderAcompanhamento(main);
+  if (state.page === 'minhas-demandas') return renderMinhasDemandas(main);
   if (state.page === 'notificacoes') return renderNotificacoes(main);
   if (state.page === 'automacoes') return renderAutomacoes(main);
   if (state.page === 'visao-cliente') return renderVisaoCliente(main);
@@ -315,23 +390,28 @@ function render() {
 
 function renderVisaoCliente(main) {
   const origin = window.location.origin;
+  const clients = state.clients.filter((c) => c.status === 'ativo');
   main.innerHTML = `
     <div class="page-header">
       <div>
         <h1>Visão Cliente</h1>
-        <p>Link público e individual de cada cliente — compartilhe pra ele acompanhar as entregas sem precisar de login</p>
+        <p>Link público e individual de cada cliente — cada um só vê as próprias demandas, nunca as de outro cliente</p>
       </div>
     </div>
-    <div class="vc-list">
-      ${state.clients.filter((c) => c.status === 'ativo').map((c) => {
+    <div class="clients-grid" id="vc-grid">
+      ${clients.map((c) => {
         const url = origin + '/portal?slug=' + encodeURIComponent(c.portal_slug || '');
+        const activeDemands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado').length;
         return `
-          <div class="vc-row">
-            <div class="vc-info">
-              <div class="vc-name">${escapeHtml(c.name)}</div>
-              <div class="vc-url">${escapeHtml(url)}</div>
+          <div class="client-tile vc-tile">
+            <div class="ct-top">
+              <div class="ct-avatar tag-${c.color || 'default'}">${initials(c.name)}</div>
+              <span class="badge ${c.status}">${c.status}</span>
             </div>
-            <div class="vc-actions">
+            <div class="ct-name">${escapeHtml(c.name)}</div>
+            <div class="ct-meta">${activeDemands} demanda${activeDemands === 1 ? '' : 's'} ativa${activeDemands === 1 ? '' : 's'}</div>
+            <div class="vc-url" title="${escapeHtml(url)}">${escapeHtml(url)}</div>
+            <div class="ct-actions vc-actions">
               <button class="btn secondary small vc-copy" data-url="${escapeHtml(url)}">Copiar link</button>
               <a class="btn small" href="${escapeHtml(url)}" target="_blank" rel="noopener">Abrir</a>
             </div>
@@ -341,11 +421,12 @@ function renderVisaoCliente(main) {
     </div>
   `;
   main.querySelectorAll('.vc-copy').forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
       try {
         await navigator.clipboard.writeText(btn.dataset.url);
         toast('Link copiado.', 'success');
-      } catch (e) {
+      } catch (err) {
         toast('Não foi possível copiar — copie manualmente.', 'error');
       }
     };
@@ -354,6 +435,21 @@ function renderVisaoCliente(main) {
 
 const DEADLINE_FIELD_LABELS = { prazo_final: 'Prazo final', prazo_designer: 'Prazo designer', capture_date: 'Captação' };
 const DEADLINE_DAYS_LABELS = { 0: 'no dia', 1: '1 dia antes', 2: '2 dias antes', 3: '3 dias antes', 5: '5 dias antes', 7: '7 dias antes' };
+
+// ---------- Individualização: cada pessoa só vê o que é dela; admin (Henrique/Vitória) vê tudo ----------
+function myTeamRoles() {
+  const myName = state.currentUser && state.currentUser.name;
+  if (!myName) return [];
+  const member = state.team.find((t) => t.name === myName);
+  return member ? (member.roles || []) : [];
+}
+
+// "Faz parte do card" = é a pessoa responsável pela demanda (modelo atual é de responsável único).
+function isRelevantToMe(d) {
+  if (isAdminUser()) return true;
+  const myName = state.currentUser && state.currentUser.name;
+  return !!myName && d.responsible === myName;
+}
 
 function computeDeadlineAlerts() {
   const today = todayStr();
@@ -365,6 +461,7 @@ function computeDeadlineAlerts() {
       const targetDate = addDaysStr(today, daysBefore);
       const items = state.demands.filter((d) => {
         if (DONE_STATUSES.includes(d.status)) return false;
+        if (!isRelevantToMe(d)) return false;
         if (field === 'capture_date') {
           if (d.needs_capture === false) return false;
           return d.capture_date === targetDate;
@@ -384,12 +481,22 @@ function audienceRole(audience) {
   return { filmmakers: 'Filmmaker', designers: 'Designer', social_media: 'Social Media' }[audience] || null;
 }
 
+// Admin sempre vê. Pessoa comum só vê o alerta se ela for a responsável (audience 'responsible')
+// ou se o cargo dela bater com a audiência do alerta (ex.: só Designers veem alerta pra Designers).
+function amInAudience(audience, d) {
+  if (isAdminUser()) return true;
+  const myName = state.currentUser && state.currentUser.name;
+  if (audience === 'responsible') return !!myName && d.responsible === myName;
+  const role = audienceRole(audience);
+  return !!role && myTeamRoles().includes(role);
+}
+
 function computeStageAlerts() {
   const autos = (state.automations || []).filter((a) => a.active && a.kind === 'stage_alert');
   return autos.map((auto) => {
     const status = auto.trigger.status;
     const audience = auto.action.audience;
-    const items = state.demands.filter((d) => d.status === status);
+    const items = state.demands.filter((d) => d.status === status && amInAudience(audience, d));
     const role = audienceRole(audience);
     const audienceNames = role ? activeTeamNames().filter((n) => (state.team.find((t) => t.name === n).roles || []).includes(role)) : null;
     return { auto, status, audience, audienceNames, items };
@@ -423,6 +530,7 @@ function computeNotifications() {
   const waitingClient = [];
 
   state.demands.forEach((d) => {
+    if (!isRelevantToMe(d)) return;
     const done = DONE_STATUSES.includes(d.status);
     if (d.prazo_final && !done) {
       if (d.prazo_final < today) overdue.push(d);
@@ -449,7 +557,7 @@ function computeNotifications() {
 function myMentionNotifications() {
   const myName = state.currentUser && state.currentUser.name;
   if (!myName) return [];
-  return (state.mentionNotifications || []).filter((n) => n.to === myName);
+  return (state.mentionNotifications || []).filter((n) => n.to === myName || (n.to === '__admins__' && isAdminUser()));
 }
 
 function updateNavBadges() {
@@ -550,6 +658,23 @@ function computeMonthlyDeliveries(demandsForMetric) {
   });
 }
 
+function computeStatusPendingCounts(pipeline) {
+  const counts = {};
+  pipeline.forEach((d) => { counts[d.status] = (counts[d.status] || 0) + 1; });
+  return Object.entries(counts)
+    .map(([key, count]) => ({ key, label: statusDef(key).label, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function computeDeliveredFormatCounts(demandsForMetric) {
+  const counts = {};
+  demandsForMetric.forEach((d) => {
+    if (!DELIVERED_STATUSES.includes(d.status)) return;
+    (d.format || []).forEach((fm) => { counts[fm] = (counts[fm] || 0) + 1; });
+  });
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+}
+
 function computeWorkload(demandsForWorkload) {
   const byName = {};
   demandsForWorkload.forEach((d) => {
@@ -559,11 +684,296 @@ function computeWorkload(demandsForWorkload) {
   return Object.entries(byName).sort((a, b) => b[1] - a[1]);
 }
 
+// Sinaliza sobrecarga por pessoa: cruza nº de demandas abertas + atrasadas +
+// vencendo essa semana + urgentes. Thresholds pensados pra um time pequeno de
+// social media/design (ajustar aqui se o time crescer bastante).
+const WORKLOAD_LEVEL_META = {
+  ok: { label: 'Tranquilo', dot: '🟢' },
+  warn: { label: 'Atenção', dot: '🟡' },
+  over: { label: 'Sobrecarregado', dot: '🔴' },
+};
+function computeWorkloadHealth() {
+  const today = todayStr();
+  const weekEnd = addDaysStr(today, 7);
+  return activeTeamNames().map((name) => {
+    const mine = state.demands.filter((d) => d.responsible === name && !DONE_STATUSES.includes(d.status));
+    const open = mine.length;
+    const overdue = mine.filter((d) => d.prazo_final && d.prazo_final < today).length;
+    const dueThisWeek = mine.filter((d) => d.prazo_final && d.prazo_final >= today && d.prazo_final <= weekEnd).length;
+    const urgent = mine.filter((d) => d.priority === 'urgente').length;
+    let level = 'ok';
+    if (overdue >= 3 || open >= 9) level = 'over';
+    else if (overdue >= 1 || open >= 5 || urgent >= 2) level = 'warn';
+    return { name, open, overdue, dueThisWeek, urgent, level };
+  }).filter((w) => w.open > 0).sort((a, b) => b.open - a.open);
+}
+
+// Visão "por etapa/prazo": cruza cada cliente ativo com as 5 etapas do
+// pipeline (STAGES), mostrando quantas demandas estão paradas em cada
+// etapa e quantas já estão atrasadas ali. Base pro cadenciamento D-30/D-15/D-05 (task #97).
+function computeStageMatrix() {
+  const today = todayStr();
+  return state.clients
+    .filter((c) => c.status === 'ativo')
+    .map((c) => {
+      const demands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado');
+      const cells = KANBAN_STAGES.map((stage) => {
+        const inStage = demands.filter((d) => statusDef(d.status).stage === stage.key);
+        const overdue = inStage.filter((d) => d.prazo_final && d.prazo_final < today && !DONE_STATUSES.includes(d.status));
+        return { stageKey: stage.key, count: inStage.length, overdue: overdue.length };
+      });
+      const totalOverdue = cells.reduce((s, cell) => s + cell.overdue, 0);
+      const total = demands.length;
+      return { client: c, cells, totalOverdue, total };
+    })
+    .filter((row) => row.total > 0)
+    .sort((a, b) => b.totalOverdue - a.totalOverdue || b.total - a.total);
+}
+
+// Cadência WAS: (1) tudo que vence nos próximos 15 dias já devia estar
+// pronto/programado pra postar; (2) tudo que vence entre 16-30 dias já devia
+// ter o briefing aprovado pelo cliente (fora das etapas 1-2). Regra do
+// Henrique: "dia 01 já temos que ter entregue os posts do dia 15, dia 15 os
+// do dia 30" + "calendário mensal aprovado com 30 dias de antecedência".
+function computeCadenceCompliance() {
+  const today = todayStr();
+  const d15 = addDaysStr(today, 15);
+  const d30 = addDaysStr(today, 30);
+  return state.clients
+    .filter((c) => c.status === 'ativo')
+    .map((c) => {
+      const demands = state.demands.filter((d) => d.client_id === c.id && d.status !== 'arquivado');
+      const dueSoon = demands.filter((d) => d.prazo_final && d.prazo_final >= today && d.prazo_final <= d15);
+      const notReady = dueSoon.filter((d) => !DELIVERED_STATUSES.includes(d.status));
+      const dueLater = demands.filter((d) => d.prazo_final && d.prazo_final > d15 && d.prazo_final <= d30);
+      const notApproved = dueLater.filter((d) => statusDef(d.status).stage <= 2);
+      return {
+        client: c,
+        dueSoonTotal: dueSoon.length, notReadyCount: notReady.length,
+        dueLaterTotal: dueLater.length, notApprovedCount: notApproved.length,
+      };
+    })
+    .filter((r) => r.dueSoonTotal > 0 || r.dueLaterTotal > 0)
+    .sort((a, b) => (b.notReadyCount + b.notApprovedCount) - (a.notReadyCount + a.notApprovedCount));
+}
+
+function renderAcompanhamento(main) {
+  if (!isAdminUser()) {
+    main.innerHTML = '<div class="empty-state">Essa área é restrita a administradores.</div>';
+    return;
+  }
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Acompanhamento</h1>
+        <p>Visão geral de tudo que está rodando — por etapa, por pessoa e por cliente</p>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn ${state.acompanhamentoTab === 'etapa' ? 'active' : ''}" id="tab-ac-etapa">Por etapa</button>
+      <button class="tab-btn ${state.acompanhamentoTab === 'pessoa' ? 'active' : ''}" id="tab-ac-pessoa">Por pessoa</button>
+      <button class="tab-btn ${state.acompanhamentoTab === 'cliente' ? 'active' : ''}" id="tab-ac-cliente">Por cliente</button>
+      <button class="tab-btn ${state.acompanhamentoTab === 'cadencia' ? 'active' : ''}" id="tab-ac-cadencia">Cadência</button>
+    </div>
+    <div id="tab-content"></div>
+  `;
+  document.getElementById('tab-ac-etapa').onclick = () => { state.acompanhamentoTab = 'etapa'; renderAcompanhamento(main); };
+  document.getElementById('tab-ac-pessoa').onclick = () => { state.acompanhamentoTab = 'pessoa'; renderAcompanhamento(main); };
+  document.getElementById('tab-ac-cliente').onclick = () => { state.acompanhamentoTab = 'cliente'; renderAcompanhamento(main); };
+  document.getElementById('tab-ac-cadencia').onclick = () => { state.acompanhamentoTab = 'cadencia'; renderAcompanhamento(main); };
+
+  const root = document.getElementById('tab-content');
+  if (state.acompanhamentoTab === 'etapa') renderAcompanhamentoEtapa(root);
+  else if (state.acompanhamentoTab === 'pessoa') renderAcompanhamentoPessoa(root);
+  else if (state.acompanhamentoTab === 'cliente') renderAcompanhamentoCliente(root);
+  else renderAcompanhamentoCadencia(root);
+}
+
+function renderAcompanhamentoEtapa(root) {
+  const rows = computeStageMatrix();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda em aberto ainda.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Quantas demandas cada cliente tem parada em cada etapa do pipeline. Números em vermelho = atrasadas naquela etapa.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Cliente</th>
+            ${KANBAN_STAGES.map((s) => `<th style="text-align:center">${escapeHtml(s.label)}</th>`).join('')}
+            <th style="text-align:center">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td><a href="#" data-open-client="${r.client.id}">${escapeHtml(r.client.name)}</a></td>
+              ${r.cells.map((cell) => `
+                <td style="text-align:center">
+                  ${cell.count === 0 ? '<span style="color:var(--text-dim)">—</span>' : (
+                    cell.overdue > 0
+                      ? `<span class="tag tag-red">${cell.count} (${cell.overdue} atrasada${cell.overdue === 1 ? '' : 's'})</span>`
+                      : `<span class="tag tag-gray">${cell.count}</span>`
+                  )}
+                </td>
+              `).join('')}
+              <td style="text-align:center;font-weight:600">${r.total}${r.totalOverdue > 0 ? ` <span class="tag tag-red">${r.totalOverdue} atrasada${r.totalOverdue === 1 ? '' : 's'}</span>` : ''}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll('[data-open-client]').forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.currentClientId = a.dataset.openClient;
+      state.page = 'cliente-detail';
+      render();
+    };
+  });
+}
+
+function renderAcompanhamentoPessoa(root) {
+  const rows = computeWorkloadHealth();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda em aberto ainda.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Carga de trabalho de cada pessoa do time: quanto tem aberto, atrasado, vencendo essa semana e urgente.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Pessoa</th>
+            <th style="text-align:center">Situação</th>
+            <th style="text-align:center">Em aberto</th>
+            <th style="text-align:center">Atrasadas</th>
+            <th style="text-align:center">Vencem essa semana</th>
+            <th style="text-align:center">Urgentes</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((w) => {
+            const meta = WORKLOAD_LEVEL_META[w.level];
+            return `
+            <tr>
+              <td>${escapeHtml(w.name)}</td>
+              <td style="text-align:center">${meta.dot} ${meta.label}</td>
+              <td style="text-align:center">${w.open}</td>
+              <td style="text-align:center">${w.overdue > 0 ? `<span class="tag tag-red">${w.overdue}</span>` : '—'}</td>
+              <td style="text-align:center">${w.dueThisWeek}</td>
+              <td style="text-align:center">${w.urgent > 0 ? `<span class="tag tag-orange">${w.urgent}</span>` : '—'}</td>
+            </tr>
+          `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderAcompanhamentoCliente(root) {
+  const rows = computeClientHealth();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda em aberto ainda.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Termômetro de cada cliente ativo: pipeline aberto, atrasos e itens esperando aprovação.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Cliente</th>
+            <th style="text-align:center">Situação</th>
+            <th style="text-align:center">Pipeline aberto</th>
+            <th style="text-align:center">Atrasadas</th>
+            <th style="text-align:center">Aguardando aprovação</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((h) => {
+            const meta = HEALTH_DEFS[h.status];
+            return `
+            <tr>
+              <td><a href="#" data-open-client="${h.client.id}">${escapeHtml(h.client.name)}</a></td>
+              <td style="text-align:center">${meta.icon} ${meta.label}</td>
+              <td style="text-align:center">${h.pipeline}</td>
+              <td style="text-align:center">${h.overdue > 0 ? `<span class="tag tag-red">${h.overdue}</span>` : '—'}</td>
+              <td style="text-align:center">${h.waiting > 0 ? `<span class="tag tag-yellow">${h.waiting}</span>` : '—'}</td>
+            </tr>
+          `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll('[data-open-client]').forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.currentClientId = a.dataset.openClient;
+      state.page = 'cliente-detail';
+      render();
+    };
+  });
+}
+
+function renderAcompanhamentoCadencia(root) {
+  const rows = computeCadenceCompliance();
+  if (!rows.length) {
+    root.innerHTML = '<div class="empty-state">Nenhuma demanda com prazo nos próximos 30 dias.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:10px">Padrão WAS: tudo que vence nos próximos 15 dias já devia estar pronto pra postar; tudo que vence entre 16-30 dias já devia ter o briefing aprovado pelo cliente.</p>
+    <div class="table-wrap">
+      <table class="data-table" style="table-layout:auto">
+        <thead>
+          <tr>
+            <th>Cliente</th>
+            <th style="text-align:center">Vence em até 15 dias</th>
+            <th style="text-align:center">Ainda não prontas p/ postar</th>
+            <th style="text-align:center">Vence entre 16-30 dias</th>
+            <th style="text-align:center">Briefing ainda não aprovado</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td><a href="#" data-open-client="${r.client.id}">${escapeHtml(r.client.name)}</a></td>
+              <td style="text-align:center">${r.dueSoonTotal || '—'}</td>
+              <td style="text-align:center">${r.notReadyCount > 0 ? `<span class="tag tag-red">${r.notReadyCount}</span>` : (r.dueSoonTotal ? '<span class="tag tag-green">em dia</span>' : '—')}</td>
+              <td style="text-align:center">${r.dueLaterTotal || '—'}</td>
+              <td style="text-align:center">${r.notApprovedCount > 0 ? `<span class="tag tag-yellow">${r.notApprovedCount}</span>` : (r.dueLaterTotal ? '<span class="tag tag-green">em dia</span>' : '—')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  root.querySelectorAll('[data-open-client]').forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.currentClientId = a.dataset.openClient;
+      state.page = 'cliente-detail';
+      render();
+    };
+  });
+}
+
 function renderDashboard(main) {
   const f = state.dashboardFilters;
+  const dateRange = computeDateRange(f.period, f.customStart, f.customEnd);
   const scoped = state.demands.filter((d) => {
     if (f.clientId && d.client_id !== f.clientId) return false;
     if (f.responsible && d.responsible !== f.responsible) return false;
+    if (dateRange) {
+      if (!d.prazo_final || d.prazo_final < dateRange.start || d.prazo_final > dateRange.end) return false;
+    }
     return true;
   });
 
@@ -580,6 +990,16 @@ function renderDashboard(main) {
   const urgent = pipeline.filter((d) => d.priority === 'urgente').length;
   const readyToPost = scoped.filter((d) => d.status === 'postar' || d.status === 'programado').length;
 
+  const upcomingCaptures = state.demands.filter((d) => {
+    if (f.clientId && d.client_id !== f.clientId) return false;
+    if (f.responsible && d.responsible !== f.responsible) return false;
+    if (DONE_STATUSES.includes(d.status)) return false;
+    return d.needs_capture !== false && d.capture_date && d.capture_date >= todayStr();
+  }).sort((a, b) => (a.capture_date < b.capture_date ? -1 : 1));
+
+  const workloadHealth = computeWorkloadHealth();
+  const maxWorkloadOpen = workloadHealth.length ? Math.max(...workloadHealth.map((w) => w.open)) : 0;
+
   const formatCounts = (() => {
     const counts = {};
     pipeline.forEach((d) => (d.format || []).forEach((fm) => { counts[fm] = (counts[fm] || 0) + 1; }));
@@ -593,6 +1013,10 @@ function renderDashboard(main) {
   const health = computeClientHealth();
   const monthly = computeMonthlyDeliveries(scoped);
   const maxMonthly = monthly.length ? Math.max(...monthly.map((m) => m.count)) : 0;
+  const statusPending = computeStatusPendingCounts(pipeline);
+  const maxStatusPending = statusPending.length ? statusPending[0].count : 0;
+  const deliveredFormatCounts = computeDeliveredFormatCounts(scoped);
+  const maxDeliveredFormat = deliveredFormatCounts.length ? deliveredFormatCounts[0][1] : 0;
 
   main.innerHTML = `
     <div class="page-header">
@@ -611,7 +1035,19 @@ function renderDashboard(main) {
         <option value="">Todos os responsáveis</option>
         ${activeTeamNames().map((n) => `<option value="${escapeHtml(n)}" ${f.responsible === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
       </select>
-      ${(f.clientId || f.responsible) ? '<button class="btn secondary small" id="dash-filter-clear">Limpar filtros</button>' : ''}
+      <select id="dash-filter-period">
+        <option value="all" ${f.period === 'all' ? 'selected' : ''}>Todo o período</option>
+        <option value="this_month" ${f.period === 'this_month' ? 'selected' : ''}>Este mês</option>
+        <option value="last_month" ${f.period === 'last_month' ? 'selected' : ''}>Mês passado</option>
+        <option value="next_30" ${f.period === 'next_30' ? 'selected' : ''}>Próximos 30 dias</option>
+        <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Personalizado</option>
+      </select>
+      ${f.period === 'custom' ? `
+        <input type="date" id="dash-filter-start" value="${f.customStart || ''}" />
+        <span style="color:var(--text-dim);font-size:12px">até</span>
+        <input type="date" id="dash-filter-end" value="${f.customEnd || ''}" />
+      ` : ''}
+      ${(f.clientId || f.responsible || f.period !== 'all') ? '<button class="btn secondary small" id="dash-filter-clear">Limpar filtros</button>' : ''}
     </div>
 
     <div class="grid-cards">
@@ -625,8 +1061,28 @@ function renderDashboard(main) {
     </div>
 
     <div class="dash-panel" style="margin-bottom:20px">
-      <h2>Entregas por mês</h2>
-      <p class="dash-panel-sub">Demandas que chegaram a postar/programado/postado, por mês do prazo final</p>
+      <h2>🎬 Próximas captações</h2>
+      <p class="dash-panel-sub">Agenda de captação por ordem de data, a partir de hoje</p>
+      ${upcomingCaptures.length ? `
+        <div class="notif-list">
+          ${upcomingCaptures.slice(0, 8).map((d) => `
+            <div class="notif-row" data-open-capture="${d.id}">
+              <span class="notif-icon">🎬</span>
+              <div class="notif-body">
+                <div class="notif-title">${escapeHtml(d.title)}</div>
+                <div class="notif-meta">${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</div>
+              </div>
+              <div class="sub" style="flex-shrink:0">${formatDateBR(d.capture_date)}</div>
+            </div>
+          `).join('')}
+        </div>
+        ${upcomingCaptures.length > 8 ? `<p class="dash-panel-sub" style="margin:10px 0 0">+${upcomingCaptures.length - 8} outra${upcomingCaptures.length - 8 === 1 ? '' : 's'} captação${upcomingCaptures.length - 8 === 1 ? '' : 'ões'} agendada${upcomingCaptures.length - 8 === 1 ? '' : 's'}</p>` : ''}
+      ` : '<div class="empty-state">Nenhuma captação agendada no momento.</div>'}
+    </div>
+
+    <div class="dash-panel dash-panel-wide" style="margin-bottom:20px">
+      <h2>Entregas do mês</h2>
+      <p class="dash-panel-sub">Visão completa: histórico de entregas, o que ainda está pendente e por formato</p>
       ${monthly.length ? `
         <div class="format-bars">
           ${monthly.map((m) => `
@@ -638,6 +1094,40 @@ function renderDashboard(main) {
           `).join('')}
         </div>
       ` : '<div class="empty-state">Nenhuma entrega com prazo definido ainda.</div>'}
+
+      <div class="dash-subgrid">
+        <div class="dash-subpanel">
+          <h3>Status pendentes</h3>
+          <p class="dash-panel-sub">Tudo que ainda não foi entregue, por etapa atual</p>
+          ${statusPending.length ? `
+            <div class="format-bars">
+              ${statusPending.map((s) => `
+                <div class="format-bar-row">
+                  <span class="format-bar-label">${escapeHtml(s.label)}</span>
+                  <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxStatusPending ? Math.round((s.count / maxStatusPending) * 100) : 0}%"></div></div>
+                  <span class="format-bar-count">${s.count}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : '<div class="empty-state">Nada pendente — tudo entregue.</div>'}
+        </div>
+
+        <div class="dash-subpanel">
+          <h3>Entregas por formato</h3>
+          <p class="dash-panel-sub">O que já foi (ou está pronto pra ser) postado, por formato</p>
+          ${deliveredFormatCounts.length ? `
+            <div class="format-bars">
+              ${deliveredFormatCounts.map(([name, count]) => `
+                <div class="format-bar-row">
+                  <span class="format-bar-label">${escapeHtml(name)}</span>
+                  <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxDeliveredFormat ? Math.round((count / maxDeliveredFormat) * 100) : 0}%"></div></div>
+                  <span class="format-bar-count">${count}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : '<div class="empty-state">Nenhuma entrega com formato definido ainda.</div>'}
+        </div>
+      </div>
     </div>
 
     <div class="dash-split">
@@ -658,17 +1148,21 @@ function renderDashboard(main) {
 
       <div class="dash-panel">
         <h2>Carga de trabalho por responsável</h2>
-        <p class="dash-panel-sub">Quem está com mais demandas em aberto agora</p>
-        ${workload.length ? `
+        <p class="dash-panel-sub">Quem está com mais demandas em aberto — e quem pode estar sobrecarregado</p>
+        ${workloadHealth.length ? `
           <div class="format-bars">
-            ${workload.map(([name, count]) => `
-              <div class="format-bar-row">
-                <span class="format-bar-label">${escapeHtml(name)}</span>
-                <div class="format-bar-track"><div class="format-bar-fill" style="width:${maxWorkload ? Math.round((count / maxWorkload) * 100) : 0}%"></div></div>
-                <span class="format-bar-count">${count}</span>
+            ${workloadHealth.map((w) => `
+              <div class="format-bar-row" title="${w.overdue} atrasada${w.overdue === 1 ? '' : 's'} · ${w.dueThisWeek} vencendo essa semana${w.urgent ? ' · ' + w.urgent + ' urgente' + (w.urgent === 1 ? '' : 's') : ''}">
+                <span class="format-bar-label">${WORKLOAD_LEVEL_META[w.level].dot} ${escapeHtml(w.name)}</span>
+                <div class="format-bar-track"><div class="format-bar-fill workload-${w.level}" style="width:${maxWorkloadOpen ? Math.round((w.open / maxWorkloadOpen) * 100) : 0}%"></div></div>
+                <span class="format-bar-count">${w.open}</span>
               </div>
             `).join('')}
           </div>
+          <p class="dash-panel-sub" style="margin:12px 0 0">
+            ${WORKLOAD_LEVEL_META.ok.dot} Tranquilo &nbsp; ${WORKLOAD_LEVEL_META.warn.dot} Atenção &nbsp; ${WORKLOAD_LEVEL_META.over.dot} Sobrecarregado
+            ${workloadHealth.some((w) => w.level === 'over') ? ` — <strong style="color:var(--red)">${workloadHealth.filter((w) => w.level === 'over').map((w) => w.name).join(', ')}</strong> precisa de ajuda ou redistribuição de demandas` : ''}
+          </p>
         ` : '<div class="empty-state">Nenhuma demanda em aberto com responsável definido.</div>'}
       </div>
     </div>
@@ -708,11 +1202,31 @@ function renderDashboard(main) {
     state.dashboardFilters.responsible = e.target.value;
     renderDashboard(main);
   };
-  const clearBtn = document.getElementById('dash-filter-clear');
-  if (clearBtn) clearBtn.onclick = () => {
-    state.dashboardFilters = { clientId: '', responsible: '' };
+  document.getElementById('dash-filter-period').onchange = (e) => {
+    state.dashboardFilters.period = e.target.value;
     renderDashboard(main);
   };
+  const startInput = document.getElementById('dash-filter-start');
+  if (startInput) startInput.onchange = (e) => {
+    state.dashboardFilters.customStart = e.target.value;
+    renderDashboard(main);
+  };
+  const endInput = document.getElementById('dash-filter-end');
+  if (endInput) endInput.onchange = (e) => {
+    state.dashboardFilters.customEnd = e.target.value;
+    renderDashboard(main);
+  };
+  const clearBtn = document.getElementById('dash-filter-clear');
+  if (clearBtn) clearBtn.onclick = () => {
+    state.dashboardFilters = { clientId: '', responsible: '', period: 'all', customStart: '', customEnd: '' };
+    renderDashboard(main);
+  };
+  main.querySelectorAll('[data-open-capture]').forEach((el) => {
+    el.onclick = () => {
+      const demand = state.demands.find((d) => d.id === el.dataset.openCapture);
+      if (demand) openDemandModal(demand);
+    };
+  });
   main.querySelectorAll('.health-row[data-open]').forEach((el) => {
     el.onclick = async () => {
       state.currentClientId = el.dataset.open;
@@ -724,27 +1238,24 @@ function renderDashboard(main) {
       render();
     };
   });
-  startDashboardAutoRefresh();
 }
 
-// Mantém o Dashboard vivo: enquanto a página estiver aberta, busca dados novos
-// periodicamente (pra refletir o que outra pessoa do time mexeu). Some sozinho
-// ao sair da página.
-let dashboardAutoRefreshTimer = null;
-function startDashboardAutoRefresh() {
-  if (dashboardAutoRefreshTimer) return;
-  dashboardAutoRefreshTimer = setInterval(async () => {
-    if (state.page !== 'dashboard') {
-      clearInterval(dashboardAutoRefreshTimer);
-      dashboardAutoRefreshTimer = null;
-      return;
-    }
-    if (document.querySelector('.modal-backdrop')) return; // não interrompe quem está editando
+// Notificações e telas em tempo real: enquanto o app estiver aberto, busca dados
+// novos periodicamente (pra refletir o que outra pessoa do time mexeu no kanban,
+// na tabela ou em qualquer demanda) e atualiza o badge + a tela atual sozinho.
+const AUTO_REFRESH_PAGES = ['dashboard', 'demandas', 'notificacoes', 'minhas-demandas', 'cliente-detail'];
+function startGlobalAutoRefresh() {
+  setInterval(async () => {
+    if (document.querySelector('.modal-backdrop')) return; // não interrompe quem está editando um card
+    const active = document.activeElement;
+    if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return; // não interrompe quem está digitando/filtrando
+    if (document.querySelector('.demand-card.dragging')) return; // não interrompe um drag em andamento
     try {
       await loadAll();
-      if (state.page === 'dashboard') renderDashboard(document.getElementById('main'));
+      if (AUTO_REFRESH_PAGES.includes(state.page)) render();
+      else updateNavBadges();
     } catch (e) { /* silencioso — tenta de novo no próximo ciclo */ }
-  }, 15000);
+  }, 12000);
 }
 
 // ---------- Clientes (galeria estilo Notion) ----------
@@ -1304,7 +1815,7 @@ function renderCalendarPage(editor, page) {
       </div>
     </div>
     <p class="cal-hint">Arraste um card pra outro dia para mudar o prazo — como no Excel/Notion.</p>
-    <div class="cal-grid">
+    <div class="cal-scroll"><div class="cal-grid">
       ${WEEKDAY_LABELS.map((w) => `<div class="cal-weekday">${w}</div>`).join('')}
       ${cells.map((cell) => {
         if (!cell.inMonth) return `<div class="cal-cell out-month"><div class="cal-daynum">${cell.day}</div></div>`;
@@ -1327,7 +1838,7 @@ function renderCalendarPage(editor, page) {
           </div>
         `;
       }).join('')}
-    </div>
+    </div></div>
   `;
 
   editor.querySelector('#cal-prev').onclick = () => {
@@ -1694,6 +2205,79 @@ function renderKanban(root, filtered) {
   });
 }
 
+// ---------- Kanban de Briefing (Ideação → Aprovação cliente → Aprovado) ----------
+// Não é um recurso separado: reaproveita as próprias demandas nos 3 primeiros status do fluxo.
+// Ao cair em "Aprovado" o card já está com status a_fazer_design — aparece direto no
+// "A Fazer - Design" do kanban de produção (Demandas), visível pro time inteiro (inclusive social media).
+const BRIEFING_COLUMNS = [
+  { key: 'em_briefing', label: '💡 Ideação' },
+  { key: 'aprovacao_briefing', label: '📤 Aprovação do cliente' },
+  { key: 'a_fazer_design', label: '✅ Aprovado — no A Fazer do time' },
+];
+
+function renderBriefingKanban(main) {
+  const filtered = state.demands.filter((d) => BRIEFING_COLUMNS.some((c) => c.key === d.status));
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>🧠 Briefing</h1>
+        <p>Ideação e aprovação de conteúdo com o cliente. Ao aprovar, o card já cai no "A Fazer" do time de produção.</p>
+      </div>
+    </div>
+    <div class="kanban" id="briefing-kanban"></div>
+    <div class="board-footer" id="briefing-footer"></div>
+  `;
+  const kanban = document.getElementById('briefing-kanban');
+  kanban.innerHTML = `
+    <div class="stage-cols">
+      ${BRIEFING_COLUMNS.map((col) => {
+        const items = filtered.filter((d) => d.status === col.key);
+        return `
+          <div class="kanban-col" data-status="${col.key}">
+            <div class="col-head">
+              <h3>${col.label}</h3>
+              <span class="count">${items.length}</span>
+              <button class="col-add-btn" data-add="${col.key}" title="Novo briefing nesta coluna">+</button>
+            </div>
+            <div class="col-body" data-status="${col.key}">
+              ${items.map((d) => renderDemandCard(d)).join('')}
+              <button class="col-add-footer" data-add="${col.key}">+ Adicionar</button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+  document.getElementById('briefing-footer').innerHTML = `${filtered.length} briefing${filtered.length === 1 ? '' : 's'} no total`;
+
+  wireDemandCardEvents(kanban);
+
+  kanban.querySelectorAll('[data-add]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      openDemandModal(null, el.dataset.add);
+    };
+  });
+
+  kanban.querySelectorAll('.col-body').forEach((col) => {
+    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const demandId = e.dataTransfer.getData('text/plain');
+      const newStatus = col.dataset.status;
+      const demand = state.demands.find((d) => d.id === demandId);
+      if (!demand || demand.status === newStatus) return;
+      const justApproved = newStatus === 'a_fazer_design';
+      demand.status = newStatus; // atualização otimista
+      renderBriefingKanban(document.getElementById('main'));
+      await api('/demands/' + demandId, { method: 'PUT', body: JSON.stringify({ status: newStatus }) });
+      if (justApproved) toast('Aprovado! Já está no "A Fazer" do time de produção.', 'success');
+    });
+  });
+}
+
 function wireDemandCardEvents(root) {
   root.querySelectorAll('.card-title-input').forEach((input) => {
     input.addEventListener('click', (e) => e.stopPropagation());
@@ -1750,15 +2334,20 @@ function renderDemandCard(d) {
     captureBadge = '<span class="tag tag-default">captação a definir</span>';
   }
   const urg = urgencyClass(d);
+  const respLine = (d.responsible_captacao || d.responsible_edicao) ? `
+      <div class="sub sub-mini">
+        <span>${d.responsible_captacao ? '🎬 ' + escapeHtml(d.responsible_captacao) : ''}${d.responsible_captacao && d.responsible_edicao ? ' · ' : ''}${d.responsible_edicao ? '✂️ ' + escapeHtml(d.responsible_edicao) : ''}</span>
+      </div>` : '';
   return `
     <div class="demand-card ${urg}" data-id="${d.id}" draggable="true">
       <input type="text" class="title card-title-input" data-id="${d.id}" value="${escapeHtml(d.title)}" />
       ${tags ? `<div class="tag-group">${tags}</div>` : ''}
-      <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}</div>
+      <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}${d.capture_link ? `<a href="${escapeHtml(d.capture_link)}" target="_blank" rel="noopener" class="tag tag-purple" onclick="event.stopPropagation()">🔗 material</a>` : ''}</div>
       <div class="sub">
         <span><span class="priority-dot ${d.priority}"></span>${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</span>
         <span class="${urg ? urg + '-text' : ''}">${formatDateBR(d.prazo_final) || formatDateBR(d.prazo_designer) || ''}</span>
       </div>
+      ${respLine}
     </div>
   `;
 }
@@ -2232,6 +2821,7 @@ function renderTableCell(colId, d, rowIndex, teamNames) {
     return `<td class="cell-capture">
       <label class="capture-toggle"><input type="checkbox" class="cell-capture-toggle" data-id="${d.id}" ${d.needs_capture !== false ? 'checked' : ''} /> 🎬</label>
       ${d.needs_capture !== false ? `<input type="date" class="cell-input cell-capture-date" data-id="${d.id}" value="${d.capture_date || ''}" />` : ''}
+      ${d.capture_link ? `<a href="${escapeHtml(d.capture_link)}" target="_blank" rel="noopener" class="cell-capture-link" title="Abrir material de captação">🔗</a>` : ''}
     </td>`;
   }
   const val = (d.custom_fields && d.custom_fields[colId]) || '';
@@ -2269,10 +2859,11 @@ function renderDemandTable(root, filtered) {
   state.tableRowIds = sorted.map((d) => d.id);
   const totalCols = state.tableColumnOrder.length + 3; // checkbox + colunas + spacer da coluna "+" + expandir
 
+  const DEFAULT_COL_WIDTH = { title: 220, client: 130, status: 150, format: 140, platform: 150, responsible: 100, priority: 90, prazo_designer: 110, prazo_final: 110, captacao: 140 };
   const headerCells = state.tableColumnOrder.map((colId) => {
-    const w = state.tableColumnWidths[colId];
+    const w = state.tableColumnWidths[colId] || DEFAULT_COL_WIDTH[colId] || 120;
     return `
-    <th draggable="true" data-col="${colId}" class="th-draggable" ${w ? `style="width:${w}px"` : ''}>
+    <th draggable="true" data-col="${colId}" class="th-draggable" style="width:${w}px">
       <span class="th-label">${escapeHtml(columnLabel(colId))}</span>
       ${state.customColumns.some((c) => c.id === colId) ? `<span class="th-del" data-delcol="${colId}" title="Excluir coluna">×</span>` : ''}
       <span class="th-resize-handle" data-resize="${colId}"></span>
@@ -2612,6 +3203,10 @@ function openDemandModal(demand, defaultStatus) {
 
   const teamOptions = activeTeamNames();
   if (demand.responsible && !teamOptions.includes(demand.responsible)) teamOptions.push(demand.responsible);
+  const respCaptacaoOptions = activeTeamNames();
+  if (demand.responsible_captacao && !respCaptacaoOptions.includes(demand.responsible_captacao)) respCaptacaoOptions.push(demand.responsible_captacao);
+  const respEdicaoOptions = activeTeamNames();
+  if (demand.responsible_edicao && !respEdicaoOptions.includes(demand.responsible_edicao)) respEdicaoOptions.push(demand.responsible_edicao);
   const hasNotes = !!(demand.briefing || demand.description);
 
   showModal(`
@@ -2675,6 +3270,7 @@ function openDemandModal(demand, defaultStatus) {
       </label>
       <div id="capture-date-wrap" style="${demand.needs_capture === false ? 'display:none' : ''};margin-top:8px">
         <input type="date" id="f-capture-date" value="${demand.capture_date || ''}" />
+        <input type="text" id="f-capture-link" placeholder="Link do material de captação (drive, etc.)" value="${escapeHtml(demand.capture_link || '')}" style="width:100%;margin-top:8px" />
       </div>
       <div class="two-col" style="margin-top:12px">
         <div>
@@ -2704,6 +3300,22 @@ function openDemandModal(demand, defaultStatus) {
           </select>
         </div>
       </div>
+      <div class="two-col" style="margin-top:12px">
+        <div>
+          <label>Responsável Captação</label>
+          <select id="f-resp-captacao">
+            <option value="">— Sem responsável —</option>
+            ${respCaptacaoOptions.map((n) => `<option value="${escapeHtml(n)}" ${demand.responsible_captacao === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label>Responsável Edição</label>
+          <select id="f-resp-edicao">
+            <option value="">— Sem responsável —</option>
+            ${respEdicaoOptions.map((n) => `<option value="${escapeHtml(n)}" ${demand.responsible_edicao === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
     </div>
 
     <details class="field-details" open>
@@ -2714,10 +3326,6 @@ function openDemandModal(demand, defaultStatus) {
       <textarea id="f-desc" style="min-height:44px">${escapeHtml(demand.description)}</textarea>
       <label>Link (arquivo, drive, etc.)</label>
       <input type="text" id="f-link" value="${escapeHtml(demand.link)}" style="width:100%" />
-      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
-        <input type="checkbox" id="f-visible" ${demand.visible_to_client ? 'checked' : ''} style="width:auto" />
-        Visível no portal do cliente
-      </label>
     </details>
 
     <details class="field-details" open>
@@ -2727,7 +3335,11 @@ function openDemandModal(demand, defaultStatus) {
           <div class="comment-row">
             <div class="comment-avatar">${initials(c.author)}</div>
             <div class="comment-body">
-              <div class="comment-head"><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-time">${formatDateTimeBR(c.created_at)}</span></div>
+              <div class="comment-head">
+                <span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-time">${formatDateTimeBR(c.created_at)}</span>
+                ${c.via === 'client' ? '<span class="tag tag-default" style="font-size:9.5px;padding:1px 6px">via cliente</span>' : ''}
+                ${(state.currentUser && state.currentUser.name === c.author) ? `<button class="comment-del" data-del-comment="${c.id}" title="Excluir comentário">🗑</button>` : ''}
+              </div>
               <div class="comment-text">${renderCommentText(c.text)}</div>
             </div>
           </div>
@@ -2773,8 +3385,10 @@ function openDemandModal(demand, defaultStatus) {
   document.getElementById('f-forecast').onchange = (e) => patch({ forecast: e.target.value });
   document.getElementById('f-refacao').onchange = (e) => patch({ refacao: e.target.value });
   document.getElementById('f-resp').onchange = (e) => patch({ responsible: e.target.value });
+  document.getElementById('f-resp-captacao').onchange = (e) => patch({ responsible_captacao: e.target.value });
+  document.getElementById('f-resp-edicao').onchange = (e) => patch({ responsible_edicao: e.target.value });
   document.getElementById('f-link').addEventListener('input', (e) => patchDebounced({ link: e.target.value.trim() }));
-  document.getElementById('f-visible').onchange = (e) => patch({ visible_to_client: e.target.checked });
+  document.getElementById('f-capture-link').addEventListener('input', (e) => patchDebounced({ capture_link: e.target.value.trim() }));
   document.getElementById('f-prazo-designer').onchange = (e) => patch({ prazo_designer: e.target.value });
   document.getElementById('f-prazo-final').onchange = (e) => patch({ prazo_final: e.target.value });
   document.getElementById('f-needs-capture').onchange = (e) => {
@@ -2833,6 +3447,23 @@ function openDemandModal(demand, defaultStatus) {
     if (idx > -1) state.demands[idx].comments = updated.comments;
     openDemandModal(demand);
   };
+  document.querySelectorAll('.comment-del[data-del-comment]').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const commentId = btn.dataset.delComment;
+      const ok = await confirmDialog('Excluir este comentário?');
+      if (!ok) return;
+      try {
+        const updated = await api('/demands/' + demand.id + '/comments/' + commentId, { method: 'DELETE' });
+        demand.comments = updated.comments;
+        const idx = state.demands.findIndex((d) => d.id === demand.id);
+        if (idx > -1) state.demands[idx].comments = updated.comments;
+        openDemandModal(demand);
+      } catch (err) {
+        toast(err.message || 'Não foi possível excluir o comentário.', 'error');
+      }
+    };
+  });
 
   document.getElementById('btn-close').onclick = closeModal;
   document.getElementById('btn-delete').onclick = async () => {
@@ -2897,19 +3528,110 @@ function renderNotifSection(title, colorClass, count, itemsHtml) {
   `;
 }
 
+function renderMinhasDemandas(main) {
+  const myName = state.currentUser && state.currentUser.name;
+  const f = state.minhasDemandasFilters;
+  const dateRange = computeDateRange(f.period, f.customStart, f.customEnd);
+  let mine = state.demands.filter((d) => d.responsible === myName);
+  if (!f.showDone) mine = mine.filter((d) => !DONE_STATUSES.includes(d.status));
+  if (dateRange) {
+    mine = mine.filter((d) => d.prazo_final && d.prazo_final >= dateRange.start && d.prazo_final <= dateRange.end);
+  }
+
+  const today = todayStr();
+  const overdue = mine.filter((d) => d.prazo_final && d.prazo_final < today && !DONE_STATUSES.includes(d.status));
+  const thisWeek = mine.filter((d) => d.prazo_final && d.prazo_final >= today && d.prazo_final <= addDaysStr(today, 7) && !overdue.includes(d));
+  const later = mine.filter((d) => d.prazo_final && d.prazo_final > addDaysStr(today, 7));
+  const noDate = mine.filter((d) => !d.prazo_final);
+  const doneGroup = f.showDone ? mine.filter((d) => DONE_STATUSES.includes(d.status)) : [];
+  const notDoneIds = new Set([...overdue, ...thisWeek, ...later, ...noDate].map((d) => d.id));
+  const doneOnly = doneGroup.filter((d) => !notDoneIds.has(d.id));
+
+  const sortByPrazo = (arr) => [...arr].sort((a, b) => (a.prazo_final || '9999') < (b.prazo_final || '9999') ? -1 : 1);
+
+  const group = (label, colorClass, items) => {
+    if (!items.length) return '';
+    return `
+      <div class="dash-panel" style="margin-bottom:16px">
+        <div class="notif-section-title ${colorClass}">${label} <span class="count">${items.length}</span></div>
+        <div class="card-list" style="margin-top:10px">${sortByPrazo(items).map(renderDemandCard).join('')}</div>
+      </div>
+    `;
+  };
+
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Minha Demanda</h1>
+        <p>Tudo que está sob sua responsabilidade, num só lugar</p>
+      </div>
+    </div>
+
+    <div class="dash-filters">
+      <select id="minhas-filter-period">
+        <option value="all" ${f.period === 'all' ? 'selected' : ''}>Todo o período</option>
+        <option value="this_month" ${f.period === 'this_month' ? 'selected' : ''}>Este mês</option>
+        <option value="next_30" ${f.period === 'next_30' ? 'selected' : ''}>Próximos 30 dias</option>
+        <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Personalizado</option>
+      </select>
+      ${f.period === 'custom' ? `
+        <input type="date" id="minhas-filter-start" value="${f.customStart || ''}" />
+        <span style="color:var(--text-dim);font-size:12px">até</span>
+        <input type="date" id="minhas-filter-end" value="${f.customEnd || ''}" />
+      ` : ''}
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-dim);cursor:pointer">
+        <input type="checkbox" id="minhas-filter-done" ${f.showDone ? 'checked' : ''} /> Mostrar concluídas
+      </label>
+      ${(f.period !== 'all' || f.showDone) ? '<button class="btn secondary small" id="minhas-filter-clear">Limpar filtros</button>' : ''}
+    </div>
+
+    ${mine.length ? `
+      ${group('⚠️ Atrasadas', 'red', overdue)}
+      ${group('🚀 Esta semana', 'orange', thisWeek)}
+      ${group('📅 Mais adiante', 'blue', later)}
+      ${group('🗓️ Sem prazo definido', 'gray', noDate)}
+      ${group('✅ Concluídas', 'green', doneOnly)}
+    ` : '<div class="empty-state">Nenhuma demanda sob sua responsabilidade no momento. 🎉</div>'}
+  `;
+
+  wireDemandCardEvents(main);
+
+  const periodSel = document.getElementById('minhas-filter-period');
+  if (periodSel) periodSel.onchange = (e) => { state.minhasDemandasFilters.period = e.target.value; render(); };
+  const startInput = document.getElementById('minhas-filter-start');
+  if (startInput) startInput.onchange = (e) => { state.minhasDemandasFilters.customStart = e.target.value; render(); };
+  const endInput = document.getElementById('minhas-filter-end');
+  if (endInput) endInput.onchange = (e) => { state.minhasDemandasFilters.customEnd = e.target.value; render(); };
+  const doneCheck = document.getElementById('minhas-filter-done');
+  if (doneCheck) doneCheck.onchange = (e) => { state.minhasDemandasFilters.showDone = e.target.checked; render(); };
+  const clearBtn = document.getElementById('minhas-filter-clear');
+  if (clearBtn) clearBtn.onclick = () => { state.minhasDemandasFilters = { period: 'all', customStart: '', customEnd: '', showDone: false }; render(); };
+}
+
 function renderNotificacoes(main) {
   const n = computeNotifications();
+  const MENTION_TYPE_META = {
+    mention: { icon: '💬', title: (m) => `${escapeHtml(m.from)} te marcou` },
+    client_comment: { icon: '💬', title: (m) => `${escapeHtml(m.from)} comentou` },
+    weekly_summary: { icon: '🗓️', title: () => 'Resumo da semana' },
+    assignment: { icon: '🧑‍💼', title: (m) => `${escapeHtml(m.from)} te atribuiu uma demanda` },
+    monthly_closing: { icon: '📕', title: () => 'Fechamento mensal pendente' },
+    partial_closing: { icon: '📗', title: () => 'Fechamento parcial pendente' },
+  };
   const mentions = myMentionNotifications().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  const mentionHtml = mentions.map((m) => `
+  const mentionHtml = mentions.map((m) => {
+    const meta = MENTION_TYPE_META[m.type] || MENTION_TYPE_META.mention;
+    return `
     <div class="notif-row ${m.read ? '' : 'notif-unread'}" data-open="${m.demand_id}" data-mention-id="${m.id}">
-      <span class="notif-icon">💬</span>
+      <span class="notif-icon">${meta.icon}</span>
       <div class="notif-body">
-        <div class="notif-title">${escapeHtml(m.from)} te marcou</div>
+        <div class="notif-title">${meta.title(m)}</div>
         <div class="notif-meta">${escapeHtml(m.message)}</div>
       </div>
     </div>
-  `).join('');
-  const mentionSection = renderNotifSection('Você foi marcado', 'pink', mentions.length, mentionHtml);
+  `;
+  }).join('');
+  const mentionSection = renderNotifSection('Avisos e menções', 'pink', mentions.length, mentionHtml);
 
   const overdueHtml = n.overdue.map((d) => notifRow('⚠️', d.title, `${escapeHtml(clientName(d.client_id))} · vencia em ${formatDateBR(d.prazo_final)}`, d)).join('');
   const todayHtml = n.dueToday.map((d) => notifRow('🚀', d.title, `${escapeHtml(clientName(d.client_id))} · entrega hoje`, d)).join('');
@@ -2947,23 +3669,6 @@ function renderNotificacoes(main) {
     stageAlertHtml,
   ].join('');
 
-  let weeklyHtml = '';
-  if (n.weeklySummary) {
-    const rows = n.weeklySummary.days.map((g) => `
-      <div class="weekly-day-group">
-        <div class="weekly-day-label">${formatDateBR(g.dateStr)}</div>
-        ${g.items.map((d) => notifRow('📌', d.title, `${escapeHtml(clientName(d.client_id))} · ${escapeHtml(statusDef(d.status).label)}`, d)).join('')}
-      </div>
-    `).join('');
-    weeklyHtml = `
-      <div class="notif-section weekly-summary">
-        <div class="notif-section-title blue">🗓️ Resumo da semana <span class="count">${n.weeklySummary.total}</span></div>
-        <p class="dash-panel-sub" style="margin:2px 0 10px">Tudo que vence entre hoje e domingo, gerado automaticamente toda segunda-feira.</p>
-        <div class="notif-list">${rows}</div>
-      </div>
-    `;
-  }
-
   main.innerHTML = `
     <div class="page-header">
       <div>
@@ -2971,14 +3676,20 @@ function renderNotificacoes(main) {
         <p>Tudo que precisa da sua atenção agora, num só lugar</p>
       </div>
     </div>
-    ${weeklyHtml}
-    ${sections || (!weeklyHtml ? '<div class="empty-state">Tudo em dia — nenhuma pendência no momento. 🎉</div>' : '')}
+    ${sections || '<div class="empty-state">Tudo em dia — nenhuma pendência no momento. 🎉</div>'}
   `;
 
   main.querySelectorAll('.notif-row').forEach((row) => {
     row.onclick = () => {
       if (row.dataset.mentionId) api('/notifications/' + row.dataset.mentionId, { method: 'PUT', body: JSON.stringify({ read: true }) });
-      openDemandModal(state.demands.find((d) => d.id === row.dataset.open));
+      const demand = state.demands.find((d) => d.id === row.dataset.open);
+      if (demand) return openDemandModal(demand);
+      const mention = mentions.find((m) => m.id === row.dataset.mentionId);
+      if (mention && mention.client_id) {
+        state.currentClientId = mention.client_id;
+        state.page = 'cliente-detail';
+        render();
+      }
     };
   });
 }
@@ -3005,14 +3716,131 @@ function renderAutomacoes(main) {
     <div class="tabs">
       <button class="tab-btn ${state.automacoesTab === 'regras' ? 'active' : ''}" id="tab-regras">Regras</button>
       <button class="tab-btn ${state.automacoesTab === 'equipe' ? 'active' : ''}" id="tab-equipe">Equipe</button>
+      ${isAdminUser() ? `<button class="tab-btn ${state.automacoesTab === 'acesso' ? 'active' : ''}" id="tab-acesso">Acesso</button>` : ''}
     </div>
     <div id="tab-content"></div>
   `;
   document.getElementById('tab-regras').onclick = () => { state.automacoesTab = 'regras'; renderAutomacoes(main); };
   document.getElementById('tab-equipe').onclick = () => { state.automacoesTab = 'equipe'; renderAutomacoes(main); };
+  const tabAcesso = document.getElementById('tab-acesso');
+  if (tabAcesso) tabAcesso.onclick = () => { state.automacoesTab = 'acesso'; renderAutomacoes(main); };
 
   if (state.automacoesTab === 'regras') renderAutomationRules(document.getElementById('tab-content'));
+  else if (state.automacoesTab === 'acesso' && isAdminUser()) renderAccessTab(document.getElementById('tab-content'));
   else renderTeamTab(document.getElementById('tab-content'));
+}
+
+function isAdminUser() {
+  return !!(state.currentUser && state.currentUser.role === 'admin');
+}
+
+function renderAccessTab(root) {
+  root.innerHTML = `
+    <div class="page-header" style="margin-bottom:14px">
+      <p style="color:var(--text-dim);font-size:12px;max-width:560px">Quem tem login no WAS Hub, qual o papel de cada um (admin vê tudo, membro só o que for liberado) e quais clientes cada pessoa enxerga.</p>
+      <button class="btn secondary small" id="btn-new-user">+ Novo usuário</button>
+    </div>
+    <div class="card-list" id="access-list"></div>
+  `;
+  document.getElementById('btn-new-user').onclick = () => openUserModal();
+  const list = document.getElementById('access-list');
+  if (!state.users.length) {
+    list.innerHTML = '<div class="empty-state">Nenhum usuário carregado.</div>';
+    return;
+  }
+  list.innerHTML = state.users.map((u) => {
+    const visLabel = u.visibleClientIds === 'all' ? 'Todos os clientes' : `${(u.visibleClientIds || []).length} cliente(s) liberado(s)`;
+    return `
+    <div class="client-card">
+      <div>
+        <div class="name">${escapeHtml(u.name)} <span class="tag tag-${u.role === 'admin' ? 'purple' : 'gray'}">${u.role === 'admin' ? 'Admin' : 'Membro'}</span> <span class="tag tag-${u.active ? 'green' : 'red'}">${u.active ? 'Ativo' : 'Acesso revogado'}</span></div>
+        <div class="meta">${escapeHtml(u.email || 'sem e-mail')} · ${escapeHtml(visLabel)}</div>
+      </div>
+      <div class="ct-actions">
+        <button class="icon-btn" data-edit-user="${u.id}" title="Editar">✏️</button>
+        ${u.active ? `<button class="icon-btn danger" data-revoke-user="${u.id}" title="Revogar acesso">🚫</button>` : ''}
+      </div>
+    </div>
+  `;
+  }).join('');
+  list.querySelectorAll('[data-edit-user]').forEach((btn) => {
+    btn.onclick = () => openUserModal(state.users.find((u) => u.id === btn.dataset.editUser));
+  });
+  list.querySelectorAll('[data-revoke-user]').forEach((btn) => {
+    btn.onclick = async () => {
+      const ok = await confirmDialog('Revogar o acesso desse usuário? Ele não vai mais conseguir entrar no WAS Hub.');
+      if (!ok) return;
+      try {
+        await api('/users/' + btn.dataset.revokeUser, { method: 'DELETE' });
+        await loadAll();
+        renderAutomacoes(document.getElementById('main'));
+        toast('Acesso revogado.', 'success');
+      } catch (e) {
+        toast(e.message || 'Não foi possível revogar o acesso.', 'error');
+      }
+    };
+  });
+}
+
+function openUserModal(user) {
+  const isEdit = !!user;
+  const clientsHtml = state.clients.map((c) => {
+    const checked = isEdit && Array.isArray(user.visibleClientIds) && user.visibleClientIds.includes(c.id);
+    return `<label class="chip"><input type="checkbox" class="f-client-vis" value="${c.id}" ${checked ? 'checked' : ''}/>${escapeHtml(c.name)}</label>`;
+  }).join('');
+  const allSelected = !isEdit || user.visibleClientIds === 'all';
+  showModal(`
+    <h2>${isEdit ? 'Editar usuário' : 'Novo usuário'}</h2>
+    <label>Nome</label>
+    <input type="text" id="f-name" value="${isEdit ? escapeHtml(user.name) : ''}" style="width:100%" ${isEdit ? 'disabled' : ''} />
+    <label style="margin-top:10px">E-mail</label>
+    <input type="email" id="f-email" value="${isEdit ? escapeHtml(user.email || '') : ''}" style="width:100%" />
+    <label style="margin-top:10px">${isEdit ? 'Redefinir senha (deixe em branco pra manter)' : 'Senha'}</label>
+    <input type="password" id="f-password" style="width:100%" />
+    <label style="margin-top:10px">Papel</label>
+    <select id="f-role" style="width:100%">
+      <option value="member" ${(!isEdit || user.role !== 'admin') ? 'selected' : ''}>Membro (vê só o que for liberado)</option>
+      <option value="admin" ${(isEdit && user.role === 'admin') ? 'selected' : ''}>Admin (vê e controla tudo)</option>
+    </select>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <input type="checkbox" id="f-all-clients" ${allSelected ? 'checked' : ''} style="width:auto" />
+      Acesso a todos os clientes
+    </label>
+    <div id="f-client-picker" class="checkbox-grid" style="margin-top:8px;display:${allSelected ? 'none' : 'grid'}">${clientsHtml}</div>
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Cancelar</button>
+      <button class="btn" id="btn-save">Salvar</button>
+    </div>
+  `);
+  document.getElementById('btn-cancel').onclick = closeModal;
+  document.getElementById('f-all-clients').onchange = (e) => {
+    document.getElementById('f-client-picker').style.display = e.target.checked ? 'none' : 'grid';
+  };
+  document.getElementById('btn-save').onclick = async () => {
+    const email = document.getElementById('f-email').value.trim();
+    const password = document.getElementById('f-password').value;
+    const role = document.getElementById('f-role').value;
+    const allClients = document.getElementById('f-all-clients').checked;
+    const visibleClientIds = allClients ? 'all' : Array.from(document.querySelectorAll('.f-client-vis:checked')).map((i) => i.value);
+    try {
+      if (isEdit) {
+        const payload = { email, role, visibleClientIds };
+        if (password) payload.newPassword = password;
+        await api('/users/' + user.id, { method: 'PUT', body: JSON.stringify(payload) });
+      } else {
+        const name = document.getElementById('f-name').value.trim();
+        if (!name) { toast('Informe o nome.', 'warn'); return; }
+        if (!password || password.length < 4) { toast('A senha precisa ter pelo menos 4 caracteres.', 'warn'); return; }
+        await api('/users', { method: 'POST', body: JSON.stringify({ name, email, password, role, visibleClientIds }) });
+      }
+      closeModal();
+      await loadAll();
+      renderAutomacoes(document.getElementById('main'));
+      toast(isEdit ? 'Usuário atualizado.' : 'Usuário criado.', 'success');
+    } catch (e) {
+      toast(e.message || 'Não foi possível salvar.', 'error');
+    }
+  };
 }
 
 function renderAutomationRules(root) {
@@ -3036,6 +3864,34 @@ function renderAutomationRules(root) {
           <div>
             <div class="name">🗓️ <span class="tag tag-blue">Resumo semanal</span></div>
             <div class="meta">Toda segunda-feira, reúne na Central de Notificações tudo que vence na semana</div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
+    if (a.kind === 'monthly_closing') {
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">📕 <span class="tag tag-red">Fechamento mensal</span></div>
+            <div class="meta">Todo dia 1-5, avisa os admins do fechamento mensal pendente de cada cliente ativo</div>
+          </div>
+          <div class="actions" style="display:flex;align-items:center;gap:10px">
+            <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
+            <button class="icon-btn danger" data-del="${a.id}" title="Excluir">🗑</button>
+          </div>
+        </div>
+      `;
+    }
+    if (a.kind === 'partial_closing') {
+      return `
+        <div class="client-card">
+          <div>
+            <div class="name">📗 <span class="tag tag-orange">Fechamento parcial</span></div>
+            <div class="meta">Todo dia 15-18, avisa os admins do fechamento parcial (relatório) pendente de cada cliente ativo</div>
           </div>
           <div class="actions" style="display:flex;align-items:center;gap:10px">
             <label class="switch"><input type="checkbox" data-toggle="${a.id}" ${a.active ? 'checked' : ''} /><span class="switch-slider"></span></label>
@@ -3134,6 +3990,8 @@ function openAutomationModal() {
       <option value="deadline">Alerta de prazo (avisar antes de vencer)</option>
       <option value="stage_alert">Alerta de fase (avisar equipe na mudança de status)</option>
       <option value="weekly_summary">Resumo semanal (toda segunda-feira)</option>
+      <option value="monthly_closing">Fechamento mensal (todo dia 1-5)</option>
+      <option value="partial_closing">Fechamento parcial (todo dia 15-18)</option>
     </select>
     <div id="auto-form-field">
       <label style="margin-top:14px">Quando</label>
@@ -3174,6 +4032,12 @@ function openAutomationModal() {
     <div id="auto-form-weekly" class="hidden">
       <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Toda segunda-feira, a Central de Notificações mostra um resumo com tudo que vence naquela semana, agrupado por dia. Não requer configuração adicional.</p>
     </div>
+    <div id="auto-form-monthly" class="hidden">
+      <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Do dia 1 ao dia 5 de cada mês, os admins recebem um aviso na Central de Notificações do fechamento mensal pendente de cada cliente ativo (uma vez por cliente/mês). Não requer configuração adicional.</p>
+    </div>
+    <div id="auto-form-partial" class="hidden">
+      <p style="color:var(--text-dim);font-size:13px;margin-top:14px">Do dia 15 ao dia 18 de cada mês, os admins recebem um aviso na Central de Notificações do fechamento parcial (relatório) pendente de cada cliente ativo (uma vez por cliente/mês). Não requer configuração adicional.</p>
+    </div>
     <div class="modal-footer">
       <button class="btn secondary" id="btn-cancel">Cancelar</button>
       <button class="btn" id="btn-save">Criar automação</button>
@@ -3196,6 +4060,8 @@ function openAutomationModal() {
     document.getElementById('auto-form-deadline').classList.toggle('hidden', kind !== 'deadline');
     document.getElementById('auto-form-stage').classList.toggle('hidden', kind !== 'stage_alert');
     document.getElementById('auto-form-weekly').classList.toggle('hidden', kind !== 'weekly_summary');
+    document.getElementById('auto-form-monthly').classList.toggle('hidden', kind !== 'monthly_closing');
+    document.getElementById('auto-form-partial').classList.toggle('hidden', kind !== 'partial_closing');
   };
 
   document.getElementById('btn-cancel').onclick = closeModal;
@@ -3218,6 +4084,10 @@ function openAutomationModal() {
       };
     } else if (kind === 'weekly_summary') {
       payload = { kind: 'weekly_summary', active: true, trigger: {}, action: {} };
+    } else if (kind === 'monthly_closing') {
+      payload = { kind: 'monthly_closing', active: true, trigger: {}, action: {} };
+    } else if (kind === 'partial_closing') {
+      payload = { kind: 'partial_closing', active: true, trigger: {}, action: {} };
     } else {
       const triggerField = document.getElementById('auto-trigger-field').value;
       const actionField = document.getElementById('auto-action-field').value;
@@ -3358,6 +4228,11 @@ function closeModal() {
     return; // api() já redireciona pra /login em caso de 401
   }
   renderUserBadge();
+  if (!isAdminUser()) {
+    const acompNav = document.querySelector('.nav-item[data-page="acompanhamento"]');
+    if (acompNav) acompNav.remove();
+  }
   await loadAll();
   render();
+  startGlobalAutoRefresh();
 })();

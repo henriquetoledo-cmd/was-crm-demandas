@@ -38,6 +38,7 @@ const FORMATO_OPTIONS = [
   { name: 'Faixa', color: 'gray' }, { name: 'Flyer', color: 'gray' }, { name: 'Banner', color: 'gray' },
   { name: 'Adesivo', color: 'gray' }, { name: 'Totem', color: 'gray' }, { name: 'Brindes', color: 'gray' },
   { name: 'Apresentação', color: 'purple' }, { name: 'Moodboard', color: 'purple' }, { name: 'Identidade visual', color: 'purple' },
+  { name: 'Relatório quinzenal', color: 'blue' }, { name: 'Relatório mensal', color: 'blue' },
 ];
 
 const PLATAFORMA_OPTIONS = [
@@ -745,6 +746,46 @@ function computeSocialMediaQueue() {
   }).sort((a, b) => b.count - a.count);
 }
 
+// Métrica do Social Media — de propósito DIFERENTE da "Carga de trabalho por
+// responsável" (que é contagem de card, feita pra designer/filmmaker). O social
+// media não é medido por quantidade de card: é medido por 3 coisas do papel dele:
+// (1) criações — briefings/ideias que ele colocou no ar no período,
+// (2) relatórios quinzenais e mensais entregues (usa os formatos "Relatório
+//     quinzenal"/"Relatório mensal" em FORMATO_OPTIONS — mesmo pipeline de card,
+//     sem precisar de tela nova),
+// (3) postagens programadas (cards que ele levou até "Programado"/"Postado").
+const SOCIAL_REPORT_FORMATS = { quinzenal: 'Relatório quinzenal', mensal: 'Relatório mensal' };
+const SOCIAL_PERFORMANCE_DAYS = 30;
+
+function computeSocialMediaPerformance() {
+  const today = todayStr();
+  const periodStart = addDaysStr(today, -SOCIAL_PERFORMANCE_DAYS);
+  const socialNames = activeTeamNames().filter((n) => {
+    const member = state.team.find((t) => t.name === n);
+    return member && (member.roles || []).includes('Social Media');
+  });
+  return socialNames.map((name) => {
+    const mine = state.demands.filter((d) => d.responsible === name);
+    const criacoes = mine.filter((d) => (d.created_at || '').slice(0, 10) >= periodStart).length;
+    const relatoriosQuinzenais = mine.filter((d) =>
+      (d.format || []).includes(SOCIAL_REPORT_FORMATS.quinzenal) &&
+      DONE_STATUSES.includes(d.status) &&
+      (d.status_changed_at || d.created_at || '').slice(0, 10) >= periodStart
+    ).length;
+    const relatoriosMensais = mine.filter((d) =>
+      (d.format || []).includes(SOCIAL_REPORT_FORMATS.mensal) &&
+      DONE_STATUSES.includes(d.status) &&
+      (d.status_changed_at || d.created_at || '').slice(0, 10) >= periodStart
+    ).length;
+    const postagensProgramadas = mine.filter((d) =>
+      ['programado', 'postado'].includes(d.status) &&
+      (d.status_changed_at || d.created_at || '').slice(0, 10) >= periodStart
+    ).length;
+    return { name, criacoes, relatoriosQuinzenais, relatoriosMensais, postagensProgramadas };
+  }).filter((r) => r.criacoes || r.relatoriosQuinzenais || r.relatoriosMensais || r.postagensProgramadas)
+    .sort((a, b) => b.criacoes - a.criacoes);
+}
+
 // Visão "por etapa/prazo": cruza cada cliente ativo com as 5 etapas do
 // pipeline (STAGES), mostrando quantas demandas estão paradas em cada
 // etapa e quantas já estão atrasadas ali. Base pro cadenciamento D-30/D-15/D-05 (task #97).
@@ -1041,6 +1082,7 @@ function renderDashboard(main) {
   const maxStageQueue = stageQueue.length ? Math.max(...stageQueue.map((s) => s.count)) : 0;
   const socialQueue = computeSocialMediaQueue();
   const maxSocialQueue = socialQueue.length ? Math.max(...socialQueue.map((s) => s.count)) : 0;
+  const socialPerformance = computeSocialMediaPerformance();
 
   const formatCounts = (() => {
     const counts = {};
@@ -1242,6 +1284,41 @@ function renderDashboard(main) {
           <p class="dash-panel-sub" style="margin:12px 0 0">🔴 = tem demanda parada há ${STAGE_SLA_DAYS[1]}+ dias sem sair do briefing</p>
         ` : '<div class="empty-state">Nada parado em briefing agora.</div>'}
       </div>
+    </div>
+
+    <div class="dash-panel dash-panel-wide" style="margin-bottom:20px">
+      <h2>🎯 Performance do Social Media</h2>
+      <p class="dash-panel-sub">
+        Medida diferente do card de designer/filmmaker: aqui conta criação, relatório entregue e postagem programada —
+        últimos ${SOCIAL_PERFORMANCE_DAYS} dias.
+      </p>
+      ${socialPerformance.length ? `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Pessoa</th>
+              <th>Criações</th>
+              <th>Relatório quinzenal</th>
+              <th>Relatório mensal</th>
+              <th>Postagens programadas</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${socialPerformance.map((r) => `
+              <tr>
+                <td class="td-title">${escapeHtml(r.name)}</td>
+                <td>${r.criacoes}</td>
+                <td>${r.relatoriosQuinzenais}</td>
+                <td>${r.relatoriosMensais}</td>
+                <td>${r.postagensProgramadas}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        <p class="dash-panel-sub" style="margin:12px 0 0">
+          Relatórios contam quando o card de "Relatório quinzenal"/"Relatório mensal" é entregue (marcar o formato no card e levar até aprovado/postado).
+        </p>
+      ` : '<div class="empty-state">Sem atividade de Social Media nos últimos 30 dias. Confira se o time tem o papel "Social Media" marcado no cadastro.</div>'}
     </div>
 
     <div class="dash-panel" style="margin-bottom:30px">
@@ -2039,7 +2116,8 @@ function filterPillOptions(key) {
   return [];
 }
 
-function renderFilterBar(container) {
+function renderFilterBar(container, onChange) {
+  const rerender = onChange || (() => renderDemandas(document.getElementById('main')));
   const active = filtersActiveCount();
   container.innerHTML = `
     <div class="filter-bar">
@@ -2058,12 +2136,12 @@ function renderFilterBar(container) {
     btn.onclick = (e) => {
       e.stopPropagation();
       state.openFilterKey = state.openFilterKey === btn.dataset.pill ? null : btn.dataset.pill;
-      renderFilterBar(container);
+      renderFilterBar(container, rerender);
       if (state.openFilterKey) {
         setTimeout(() => document.addEventListener('click', (ev) => {
           if (!ev.target.closest('.filter-popover') && !ev.target.closest('[data-pill]')) {
             state.openFilterKey = null;
-            renderFilterBar(container);
+            renderFilterBar(container, rerender);
           }
         }, { once: true }), 0);
       }
@@ -2076,7 +2154,7 @@ function renderFilterBar(container) {
     state.filters.prazoDesignerFrom = ''; state.filters.prazoDesignerTo = '';
     state.filters.prazoFinalFrom = ''; state.filters.prazoFinalTo = '';
     state.openFilterKey = null;
-    renderDemandas(document.getElementById('main'));
+    rerender();
   };
 
   if (!state.openFilterKey) return;
@@ -2142,11 +2220,12 @@ function renderFilterBar(container) {
 
 // ---------- Demandas: Kanban + Tabela ----------
 function renderDemandas(main) {
+  const demandasBase = state.demands.filter((d) => !PRE_APPROVAL_STATUSES.includes(d.status));
   main.innerHTML = `
     <div class="page-header">
       <div>
         <h1>Demandas</h1>
-        <p>${state.demands.length} no total</p>
+        <p>${demandasBase.length} no total · captação em diante — briefing e aprovação do cliente ficam na aba Briefing</p>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <div class="view-toggle">
@@ -2160,12 +2239,14 @@ function renderDemandas(main) {
     <div class="toolbar" id="filter-bar-container"></div>
     <div id="demands-view"></div>
   `;
-  document.getElementById('btn-new-demand').onclick = () => openDemandModal();
+  // status inicial = etapa 3 (captação), pra não criar um card que já nasce escondido
+  // da aba Demandas (etapas 1-2 só aparecem na aba Briefing)
+  document.getElementById('btn-new-demand').onclick = () => openDemandModal(null, 'aguardando_captacao');
   document.getElementById('view-kanban').onclick = () => { state.demandsView = 'kanban'; renderDemandas(main); };
   document.getElementById('view-table').onclick = () => { state.demandsView = 'table'; renderDemandas(main); };
   renderFilterBar(document.getElementById('filter-bar-container'));
 
-  const filtered = applyFilters(state.demands);
+  const filtered = applyFilters(demandasBase);
   document.getElementById('btn-export-csv').onclick = () => exportDemandsCSV(filtered);
   const viewRoot = document.getElementById('demands-view');
   if (state.demandsView === 'table') renderDemandTable(viewRoot, filtered);
@@ -2210,7 +2291,10 @@ function exportDemandsCSV(list) {
 function renderKanban(root, filtered) {
   root.innerHTML = `<div class="kanban" id="kanban"></div><div class="board-footer" id="kanban-footer"></div>`;
   const kanban = document.getElementById('kanban');
-  kanban.innerHTML = KANBAN_STAGES.map((stage) => {
+  // Aba Demandas = board de produção: só etapa 3 (Captação e execução) em diante.
+  // Etapas 1-2 (briefing / aprovação com cliente) ficam exclusivamente na aba Briefing.
+  const DEMANDAS_STAGES = KANBAN_STAGES.filter((s) => s.key >= 3);
+  kanban.innerHTML = DEMANDAS_STAGES.map((stage) => {
     const cols = STATUS_DEFS.filter((s) => s.stage === stage.key);
     const stageCount = cols.reduce((sum, col) => sum + filtered.filter((d) => d.status === col.key).length, 0);
     const collapsed = state.collapsedStages.has(stage.key);
@@ -2286,6 +2370,10 @@ function renderKanban(root, filtered) {
 // Não é um recurso separado: reaproveita as próprias demandas nos 3 primeiros status do fluxo.
 // Ao cair em "Aprovado" o card já está com status a_fazer_design — aparece direto no
 // "A Fazer - Design" do kanban de produção (Demandas), visível pro time inteiro (inclusive social media).
+// Etapas 1-2 (briefing e aprovação com o cliente) só existem na aba Briefing.
+// A aba Demandas é o board de produção: começa na etapa 3 (Captação e execução).
+const PRE_APPROVAL_STATUSES = ['em_briefing', 'aprovacao_briefing'];
+
 const BRIEFING_COLUMNS = [
   { key: 'em_briefing', label: '💡 Ideação' },
   { key: 'aprovacao_briefing', label: '📤 Aprovação do cliente' },
@@ -2293,7 +2381,8 @@ const BRIEFING_COLUMNS = [
 ];
 
 function renderBriefingKanban(main) {
-  const filtered = state.demands.filter((d) => BRIEFING_COLUMNS.some((c) => c.key === d.status));
+  const base = state.demands.filter((d) => BRIEFING_COLUMNS.some((c) => c.key === d.status));
+  const filtered = applyFilters(base);
   main.innerHTML = `
     <div class="page-header">
       <div>
@@ -2301,9 +2390,11 @@ function renderBriefingKanban(main) {
         <p>Ideação e aprovação de conteúdo com o cliente. Ao aprovar, o card já cai no "A Fazer" do time de produção.</p>
       </div>
     </div>
+    <div class="toolbar" id="briefing-filter-bar-container"></div>
     <div class="kanban" id="briefing-kanban"></div>
     <div class="board-footer" id="briefing-footer"></div>
   `;
+  renderFilterBar(document.getElementById('briefing-filter-bar-container'), () => renderBriefingKanban(document.getElementById('main')));
   const kanban = document.getElementById('briefing-kanban');
   kanban.innerHTML = `
     <div class="stage-cols">

@@ -722,7 +722,7 @@ function daysSince(iso) {
 // paradas em cada uma das 5 etapas agora, e quantas já estouraram o SLA da etapa.
 function computeStageQueue() {
   return KANBAN_STAGES.map((stage) => {
-    const inStage = state.demands.filter((d) => d.status !== 'arquivado' && statusDef(d.status).stage === stage.key);
+    const inStage = state.demands.filter((d) => !DONE_STATUSES.includes(d.status) && statusDef(d.status).stage === stage.key);
     const ages = inStage.map((d) => daysSince(d.status_changed_at || d.created_at));
     const sla = STAGE_SLA_DAYS[stage.key] || 3;
     const stuck = ages.filter((a) => a >= sla).length;

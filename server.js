@@ -103,10 +103,14 @@ function ensureTenantShape(t) {
   if (!t.customFormatOptions) t.customFormatOptions = [];
   if (!t.customPlatformOptions) t.customPlatformOptions = [];
   if (!t.cadenceNotified) t.cadenceNotified = {};
-  t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; if (typeof d.capture_link !== 'string') d.capture_link = ''; });
+  t.demands.forEach((d) => { if (!Array.isArray(d.comments)) d.comments = []; if (typeof d.capture_link !== 'string') d.capture_link = ''; if (!d.status_changed_at) d.status_changed_at = d.created_at || new Date().toISOString(); });
 }
 
 const DONE_STATUSES_SRV = ['aprovado', 'postar', 'programado', 'postado', 'stand_by', 'arquivado'];
+
+// Etapas 1 e 2 do fluxo (Briefing + Aprovação do briefing) — antes de virar produção.
+// Designers/Filmmakers (sem papel Social Media/Coringa) não enxergam cards nessas etapas.
+const BRIEFING_STATUSES_SRV = ['em_briefing', 'aprovacao_briefing'];
 
 function isoWeekKey(d) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
@@ -339,10 +343,31 @@ function filterClientsForUser(clients, user) {
   return clients.filter((c) => allowed.has(c.id));
 }
 
-function filterDemandsForUser(demands, user) {
-  if (!user || isAdminUser(user) || user.visibleClientIds === 'all' || !Array.isArray(user.visibleClientIds)) return demands;
-  const allowed = new Set(user.visibleClientIds);
-  return demands.filter((d) => allowed.has(d.client_id));
+// Papéis (roles) do funcionário vinculado a essa conta de login (Coringa/Social Media/Designer/Filmmaker).
+function getTeamRoles(tenant, user) {
+  if (!user || !user.team_member_id || !tenant) return [];
+  const member = (tenant.team || []).find((t) => t.id === user.team_member_id);
+  return member ? (member.roles || []) : [];
+}
+
+// Só quem é admin, Coringa ou Social Media enxerga demandas ainda na etapa de Briefing —
+// designer/filmmaker só vê a partir do momento em que a demanda sai do briefing pra produção.
+function canSeeBriefingStage(tenant, user) {
+  if (!user || isAdminUser(user)) return true;
+  const roles = getTeamRoles(tenant, user);
+  return roles.includes('Social Media') || roles.includes('Coringa');
+}
+
+function filterDemandsForUser(demands, user, tenant) {
+  let list = demands;
+  if (user && !isAdminUser(user) && user.visibleClientIds !== 'all' && Array.isArray(user.visibleClientIds)) {
+    const allowed = new Set(user.visibleClientIds);
+    list = list.filter((d) => allowed.has(d.client_id));
+  }
+  if (!canSeeBriefingStage(tenant, user)) {
+    list = list.filter((d) => !BRIEFING_STATUSES_SRV.includes(d.status));
+  }
+  return list;
 }
 
 // Notifica a pessoa quando ela é definida (ou trocada) como responsável por uma demanda —
@@ -432,6 +457,23 @@ function createSession(tenantId, userId) {
   return token;
 }
 
+// ---- Autenticação por chave de API (pro MCP e outras integrações sem cookie de sessão) ----
+function getBearerToken(req) {
+  const header = req.headers['authorization'] || '';
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1].trim() : null;
+}
+
+function findUserByApiKey(root, key) {
+  if (!key) return null;
+  for (const tenantId of Object.keys(root.tenants)) {
+    const tenant = root.tenants[tenantId];
+    const user = (tenant.users || []).find((u) => u.apiKey && u.apiKey === key);
+    if (user) return { tenant, user };
+  }
+  return null;
+}
+
 // Em produção (Railway) o app roda atrás de HTTPS — cookie só trafega por HTTPS lá.
 // Em dev local (http://localhost) não força Secure, senão o navegador descarta o cookie.
 const IS_PRODUCTION = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_STATIC_URL);
@@ -447,7 +489,7 @@ function clearSessionCookie(res) {
 }
 
 function publicUser(u, tenant) {
-  return { id: u.id, name: u.name, email: u.email, role: u.role, visibleClientIds: u.visibleClientIds === undefined ? 'all' : u.visibleClientIds, tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, tenantPlan: tenant.plan };
+  return { id: u.id, name: u.name, email: u.email, role: u.role, visibleClientIds: u.visibleClientIds === undefined ? 'all' : u.visibleClientIds, teamRoles: getTeamRoles(tenant, u), hasApiKey: !!u.apiKey, tenantId: tenant.id, tenantName: tenant.name, tenantSlug: tenant.slug, tenantPlan: tenant.plan };
 }
 
 function id() {
@@ -834,23 +876,53 @@ async function handleAPI(req, res, pathname, query) {
         return sendJSON(res, 201, { user: publicUser(user, tenant) });
       }
       if (resId === 'me' && method === 'GET') {
+        // aceita tanto cookie de sessão (navegador) quanto chave de API/Bearer (MCP e integrações)
+        const session = getSession(req);
+        if (session && root.tenants[session.tenantId]) {
+          const tenant = root.tenants[session.tenantId];
+          const user = tenant.users.find((u) => u.id === session.userId);
+          if (user) return sendJSON(res, 200, { user: publicUser(user, tenant) });
+        }
+        const apiAuth = findUserByApiKey(root, getBearerToken(req));
+        if (apiAuth) return sendJSON(res, 200, { user: publicUser(apiAuth.user, apiAuth.tenant) });
+        return sendJSON(res, 401, { error: 'Não autenticado' });
+      }
+      // Gera (ou substitui) a chave de API usada pelo MCP — por padrão pra si mesmo;
+      // admin pode gerar em nome de outra pessoa passando user_id no corpo.
+      if (resId === 'api-key' && method === 'POST') {
         const session = getSession(req);
         if (!session || !root.tenants[session.tenantId]) return sendJSON(res, 401, { error: 'Não autenticado' });
         const tenant = root.tenants[session.tenantId];
-        const user = tenant.users.find((u) => u.id === session.userId);
-        if (!user) return sendJSON(res, 401, { error: 'Não autenticado' });
-        return sendJSON(res, 200, { user: publicUser(user, tenant) });
+        const requester = tenant.users.find((u) => u.id === session.userId);
+        if (!requester) return sendJSON(res, 401, { error: 'Não autenticado' });
+        const body = await readBody(req);
+        let target = requester;
+        if (body.user_id && body.user_id !== requester.id) {
+          if (!isAdminUser(requester)) return sendJSON(res, 403, { error: 'Apenas administradores podem gerar chave para outra pessoa.' });
+          const found = tenant.users.find((u) => u.id === body.user_id);
+          if (!found) return sendJSON(res, 404, { error: 'Usuário não encontrado' });
+          target = found;
+        }
+        target.apiKey = 'wh_' + crypto.randomBytes(24).toString('hex');
+        saveDB(root);
+        return sendJSON(res, 200, { apiKey: target.apiKey, user_id: target.id, user_name: target.name });
       }
       return sendJSON(res, 404, { error: 'Rota de autenticação não encontrada' });
     }
 
-    // ---- a partir daqui, toda rota exige sessão válida ----
+    // ---- a partir daqui, toda rota exige sessão válida (cookie) OU chave de API (Bearer) ----
+    let db, me;
     const session = getSession(req);
-    if (!session || !root.tenants[session.tenantId]) {
+    if (session && root.tenants[session.tenantId]) {
+      db = root.tenants[session.tenantId];
+      me = findUserBySession(db, session);
+    } else {
+      const apiAuth = findUserByApiKey(root, getBearerToken(req));
+      if (apiAuth) { db = apiAuth.tenant; me = apiAuth.user; }
+    }
+    if (!db || !me) {
       return sendJSON(res, 401, { error: 'Não autenticado' });
     }
-    const db = root.tenants[session.tenantId];
-    const me = findUserBySession(db, session);
     if (me && isAccessRevoked(db, me)) return sendJSON(res, 403, { error: 'Seu acesso foi revogado. Fale com o administrador da sua empresa.' });
     maybeGenerateWeeklySummary(root, db);
     maybeGenerateCadenceAlerts(root, db);
@@ -1055,6 +1127,7 @@ async function handleAPI(req, res, pathname, query) {
           custom_fields: {},
           comments: [],
           created_at: r.created_at || new Date().toISOString(),
+          status_changed_at: r.created_at || new Date().toISOString(),
           imported_from: r.imported_from || 'notion_csv',
         });
         created++;
@@ -1149,7 +1222,7 @@ async function handleAPI(req, res, pathname, query) {
     // ---- DEMANDS ----
     if (resource === 'demands') {
       if (method === 'GET' && !resId) {
-        let list = filterDemandsForUser(db.demands, me);
+        let list = filterDemandsForUser(db.demands, me, db);
         if (query.client_id) list = list.filter((d) => d.client_id === query.client_id);
         return sendJSON(res, 200, list);
       }
@@ -1180,6 +1253,7 @@ async function handleAPI(req, res, pathname, query) {
           custom_fields: (body.custom_fields && typeof body.custom_fields === 'object') ? body.custom_fields : {},
           comments: [],
           created_at: new Date().toISOString(),
+          status_changed_at: new Date().toISOString(),
         };
         demand = applyAutomations(db, demand);
         db.demands.push(demand);
@@ -1241,9 +1315,12 @@ async function handleAPI(req, res, pathname, query) {
         if (idx === -1) return sendJSON(res, 404, { error: 'Não encontrado' });
         const body = await readBody(req);
         const previousResponsible = db.demands[idx].responsible || '';
+        const previousStatus = db.demands[idx].status;
         // custom_fields é mesclado (não substituído), pra edições em colunas diferentes não se apagarem
         const mergedCustom = { ...(db.demands[idx].custom_fields || {}), ...(body.custom_fields || {}) };
         let demand = { ...db.demands[idx], ...body, id: resId, custom_fields: mergedCustom };
+        // marca quando a demanda entrou na etapa atual — base pra medir fila/gargalo por etapa
+        if (demand.status !== previousStatus) demand.status_changed_at = new Date().toISOString();
         demand = applyAutomations(db, demand);
         db.demands[idx] = demand;
         notifyAssignment(db, demand, previousResponsible, me);

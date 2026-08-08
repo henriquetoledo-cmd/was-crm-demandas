@@ -708,6 +708,43 @@ function computeWorkloadHealth() {
   }).filter((w) => w.open > 0).sort((a, b) => b.open - a.open);
 }
 
+// Quantos dias uma demanda pode ficar parada em cada etapa antes de virar gargalo (SLA interno).
+// Etapa 1 (briefing) e 2/4 (aprovação cliente) têm folga menor porque dependem de resposta rápida.
+const STAGE_SLA_DAYS = { 1: 3, 2: 2, 3: 5, 4: 2, 5: 2 };
+
+function daysSince(iso) {
+  if (!iso) return 0;
+  const d = (iso || '').slice(0, 10);
+  return Math.max(0, Math.floor((new Date(todayStr()) - new Date(d)) / 86400000));
+}
+
+// Fila/gargalo por etapa do pipeline (não por pessoa) — quantas demandas ativas estão
+// paradas em cada uma das 5 etapas agora, e quantas já estouraram o SLA da etapa.
+function computeStageQueue() {
+  return KANBAN_STAGES.map((stage) => {
+    const inStage = state.demands.filter((d) => d.status !== 'arquivado' && statusDef(d.status).stage === stage.key);
+    const ages = inStage.map((d) => daysSince(d.status_changed_at || d.created_at));
+    const sla = STAGE_SLA_DAYS[stage.key] || 3;
+    const stuck = ages.filter((a) => a >= sla).length;
+    return { stage, count: inStage.length, stuck, sla, oldest: ages.length ? Math.max(...ages) : 0 };
+  });
+}
+
+// Fila específica do Social Media (etapa 1 · Em briefing), por pessoa responsável —
+// é o número que responde "quem do social media tá com muita demanda parada".
+function computeSocialMediaQueue() {
+  const stage1 = state.demands.filter((d) => d.status === 'em_briefing');
+  const byPerson = {};
+  stage1.forEach((d) => {
+    const name = d.responsible || 'Sem responsável';
+    (byPerson[name] = byPerson[name] || []).push(d);
+  });
+  return Object.entries(byPerson).map(([name, items]) => {
+    const ages = items.map((d) => daysSince(d.status_changed_at || d.created_at));
+    return { name, count: items.length, oldest: ages.length ? Math.max(...ages) : 0, stuck: ages.filter((a) => a >= STAGE_SLA_DAYS[1]).length };
+  }).sort((a, b) => b.count - a.count);
+}
+
 // Visão "por etapa/prazo": cruza cada cliente ativo com as 5 etapas do
 // pipeline (STAGES), mostrando quantas demandas estão paradas em cada
 // etapa e quantas já estão atrasadas ali. Base pro cadenciamento D-30/D-15/D-05 (task #97).
@@ -1000,6 +1037,11 @@ function renderDashboard(main) {
   const workloadHealth = computeWorkloadHealth();
   const maxWorkloadOpen = workloadHealth.length ? Math.max(...workloadHealth.map((w) => w.open)) : 0;
 
+  const stageQueue = computeStageQueue();
+  const maxStageQueue = stageQueue.length ? Math.max(...stageQueue.map((s) => s.count)) : 0;
+  const socialQueue = computeSocialMediaQueue();
+  const maxSocialQueue = socialQueue.length ? Math.max(...socialQueue.map((s) => s.count)) : 0;
+
   const formatCounts = (() => {
     const counts = {};
     pipeline.forEach((d) => (d.format || []).forEach((fm) => { counts[fm] = (counts[fm] || 0) + 1; }));
@@ -1164,6 +1206,41 @@ function renderDashboard(main) {
             ${workloadHealth.some((w) => w.level === 'over') ? ` — <strong style="color:var(--red)">${workloadHealth.filter((w) => w.level === 'over').map((w) => w.name).join(', ')}</strong> precisa de ajuda ou redistribuição de demandas` : ''}
           </p>
         ` : '<div class="empty-state">Nenhuma demanda em aberto com responsável definido.</div>'}
+      </div>
+    </div>
+
+    <div class="dash-split">
+      <div class="dash-panel">
+        <h2>📥 Fila por etapa</h2>
+        <p class="dash-panel-sub">Quantas demandas ativas estão paradas em cada etapa do pipeline agora, e quantas já estouraram o prazo interno de fila (SLA)</p>
+        ${stageQueue.some((s) => s.count > 0) ? `
+          <div class="format-bars">
+            ${stageQueue.map((s) => `
+              <div class="format-bar-row" title="Mais antiga na etapa: ${s.oldest} dia${s.oldest === 1 ? '' : 's'} · SLA da etapa: ${s.sla} dia${s.sla === 1 ? '' : 's'}">
+                <span class="format-bar-label">${s.stuck ? '🔴' : '🟢'} ${escapeHtml(s.stage.label)}</span>
+                <div class="format-bar-track"><div class="format-bar-fill ${s.stuck ? 'workload-over' : ''}" style="width:${maxStageQueue ? Math.round((s.count / maxStageQueue) * 100) : 0}%"></div></div>
+                <span class="format-bar-count">${s.count}${s.stuck ? ` (${s.stuck} parada${s.stuck === 1 ? '' : 's'})` : ''}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : '<div class="empty-state">Nenhuma demanda ativa no pipeline.</div>'}
+      </div>
+
+      <div class="dash-panel">
+        <h2>🧠 Fila do Social Media (Briefing)</h2>
+        <p class="dash-panel-sub">Demandas ainda em "Em briefing" por responsável — é aqui que se vê se o social media está sobrecarregado</p>
+        ${socialQueue.length ? `
+          <div class="format-bars">
+            ${socialQueue.map((s) => `
+              <div class="format-bar-row" title="Mais antiga: ${s.oldest} dia${s.oldest === 1 ? '' : 's'} parada">
+                <span class="format-bar-label">${s.stuck ? '🔴' : '🟢'} ${escapeHtml(s.name)}</span>
+                <div class="format-bar-track"><div class="format-bar-fill ${s.stuck ? 'workload-over' : ''}" style="width:${maxSocialQueue ? Math.round((s.count / maxSocialQueue) * 100) : 0}%"></div></div>
+                <span class="format-bar-count">${s.count}</span>
+              </div>
+            `).join('')}
+          </div>
+          <p class="dash-panel-sub" style="margin:12px 0 0">🔴 = tem demanda parada há ${STAGE_SLA_DAYS[1]}+ dias sem sair do briefing</p>
+        ` : '<div class="empty-state">Nada parado em briefing agora.</div>'}
       </div>
     </div>
 
@@ -3734,6 +3811,13 @@ function isAdminUser() {
   return !!(state.currentUser && state.currentUser.role === 'admin');
 }
 
+// Social Media e Coringa administram o briefing; designer/filmmaker só entram depois do aprovado.
+function canSeeBriefingArea() {
+  if (isAdminUser()) return true;
+  const roles = (state.currentUser && state.currentUser.teamRoles) || [];
+  return roles.includes('Social Media') || roles.includes('Coringa');
+}
+
 function renderAccessTab(root) {
   root.innerHTML = `
     <div class="page-header" style="margin-bottom:14px">
@@ -3758,6 +3842,7 @@ function renderAccessTab(root) {
       </div>
       <div class="ct-actions">
         <button class="icon-btn" data-edit-user="${u.id}" title="Editar">✏️</button>
+        <button class="icon-btn" data-mcp-key="${u.id}" title="Chave de API (MCP)">🔑</button>
         ${u.active ? `<button class="icon-btn danger" data-revoke-user="${u.id}" title="Revogar acesso">🚫</button>` : ''}
       </div>
     </div>
@@ -3765,6 +3850,9 @@ function renderAccessTab(root) {
   }).join('');
   list.querySelectorAll('[data-edit-user]').forEach((btn) => {
     btn.onclick = () => openUserModal(state.users.find((u) => u.id === btn.dataset.editUser));
+  });
+  list.querySelectorAll('[data-mcp-key]').forEach((btn) => {
+    btn.onclick = () => openApiKeyModal(state.users.find((u) => u.id === btn.dataset.mcpKey));
   });
   list.querySelectorAll('[data-revoke-user]').forEach((btn) => {
     btn.onclick = async () => {
@@ -3780,6 +3868,39 @@ function renderAccessTab(root) {
       }
     };
   });
+}
+
+// Chave de API pro MCP: mostra o botão pra gerar/regerar, e o valor só aparece
+// uma vez na hora da geração (o servidor não guarda em claro em lugar nenhum acessível de novo).
+function openApiKeyModal(user) {
+  if (!user) return;
+  showModal(`
+    <h2>Chave de API — ${escapeHtml(user.name)}</h2>
+    <p style="color:var(--text-dim);font-size:12.5px;margin:4px 0 14px">
+      Essa chave conecta o Claude de ${escapeHtml(user.name)} direto no WAS Hub via MCP (ler e criar demandas pelo chat).
+      Gerar uma nova chave invalida a anterior.
+    </p>
+    <div id="mcp-key-output" style="min-height:20px;margin-bottom:12px"></div>
+    <div class="modal-footer">
+      <button class="btn secondary" id="btn-cancel">Fechar</button>
+      <button class="btn" id="btn-gen-key">${user.hasApiKey ? 'Gerar nova chave' : 'Gerar chave'}</button>
+    </div>
+  `);
+  document.getElementById('btn-cancel').onclick = closeModal;
+  document.getElementById('btn-gen-key').onclick = async () => {
+    try {
+      const resp = await api('/auth/api-key', { method: 'POST', body: JSON.stringify({ user_id: user.id }) });
+      document.getElementById('mcp-key-output').innerHTML = `
+        <label>Chave (copie agora, não aparece de novo)</label>
+        <input type="text" readonly value="${escapeHtml(resp.apiKey)}" style="width:100%;font-family:monospace;font-size:12px" onclick="this.select()" />
+        <p style="color:var(--text-dim);font-size:11.5px;margin-top:8px">Cole essa chave na configuração do connector was-hub-mcp (variável WAS_HUB_API_KEY).</p>
+      `;
+      await loadAll();
+      toast('Chave gerada.', 'success');
+    } catch (e) {
+      toast(e.message || 'Não foi possível gerar a chave.', 'error');
+    }
+  };
 }
 
 function openUserModal(user) {
@@ -4231,6 +4352,12 @@ function closeModal() {
   if (!isAdminUser()) {
     const acompNav = document.querySelector('.nav-item[data-page="acompanhamento"]');
     if (acompNav) acompNav.remove();
+  }
+  // Briefing (Ideação → Aprovação cliente) é área do Social Media — designer/filmmaker/editor
+  // só entram em cena depois que a demanda sai do briefing pra produção.
+  if (!canSeeBriefingArea()) {
+    const briefingNav = document.querySelector('.nav-item[data-page="briefing"]');
+    if (briefingNav) briefingNav.remove();
   }
   await loadAll();
   render();

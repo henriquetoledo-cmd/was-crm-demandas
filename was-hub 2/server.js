@@ -1,6 +1,7 @@
 // WAS — servidor local, sem dependências externas.
 // Rodar com: node server.js
 // Abrir: http://localhost:4000 (interno) | http://localhost:4000/portal (cliente)
+// Rodada 19: fila por etapa, visibilidade de briefing por role, chave de API pro MCP.
 
 const http = require('http');
 const fs = require('fs');

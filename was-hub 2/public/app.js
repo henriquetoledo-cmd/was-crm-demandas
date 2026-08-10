@@ -53,6 +53,15 @@ const PRIORIDADE_OPTIONS = [
   { key: 'urgente', label: 'Urgente', color: 'red' },
 ];
 
+// Complexidade do card: separado de prioridade — prioridade é "quando fazer", complexidade é
+// "quanto esforço/tempo consome pra fazer". Ajuda a balancear carga de trabalho de verdade
+// (5 cards simples ≠ 5 cards complexos).
+const COMPLEXIDADE_OPTIONS = [
+  { key: 'baixa', label: 'Baixa', color: 'green' },
+  { key: 'media', label: 'Média', color: 'yellow' },
+  { key: 'alta', label: 'Alta', color: 'red' },
+];
+
 const FORECAST_OPTIONS = [
   { key: 'prevista', label: 'Prevista', color: 'green' },
   { key: 'nao_prevista', label: 'Não prevista', color: 'red' },
@@ -114,6 +123,140 @@ function addDaysStr(iso, days) {
   const d = new Date(iso + 'T00:00:00');
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+// ---------- Calendário: um único popover pra clicar início e fim (usado em qualquer campo de data do app) ----------
+const MONTH_NAMES_PT = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+const WEEKDAY_LETTERS_PT = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
+
+function monthMatrix(year, month) {
+  const first = new Date(year, month, 1);
+  const startDow = first.getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) {
+    cells.push(`${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+  const weeks = [];
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+  return weeks;
+}
+
+function closeCalendarPopover() {
+  document.querySelectorAll('.cal-popover').forEach((el) => el.remove());
+}
+
+// Abre um calendário ancorado em `anchorEl`. `value` = { start, end } (strings 'yyyy-mm-dd' ou '').
+// Primeiro clique define o início, segundo define o fim (ou troca se clicar antes do início) — sem precisar
+// de dois campos separados. onChange(next) roda a cada clique (aplica na hora, sem botão "salvar").
+// opts.singleDate: fecha no primeiro clique com start=end=dia clicado (pra campos de uma data só).
+function openCalendarPopover(anchorEl, value, onChange, opts = {}) {
+  closeCalendarPopover();
+  let sel = { start: (value && value.start) || '', end: (value && value.end) || '' };
+  const base = sel.start || sel.end || todayStr();
+  let viewYear = Number(base.slice(0, 4));
+  let viewMonth = Number(base.slice(5, 7)) - 1;
+
+  const pop = document.createElement('div');
+  pop.className = 'cal-popover';
+  document.body.appendChild(pop);
+
+  function place() {
+    const rect = anchorEl.getBoundingClientRect();
+    const width = 264;
+    let left = rect.left;
+    if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+    pop.style.left = Math.max(8, left) + 'px';
+    let top = rect.bottom + 6;
+    if (top + 320 > window.innerHeight) top = Math.max(8, rect.top - 326);
+    pop.style.top = top + 'px';
+  }
+
+  function fmt(iso) { return iso ? formatDateBR(iso) : '—'; }
+
+  function draw() {
+    const weeks = monthMatrix(viewYear, viewMonth);
+    const lo = sel.start && sel.end ? (sel.start < sel.end ? sel.start : sel.end) : (sel.start || sel.end);
+    const hi = sel.start && sel.end ? (sel.start < sel.end ? sel.end : sel.start) : (sel.start || sel.end);
+    pop.innerHTML = `
+      <div class="cal-head">
+        <button type="button" class="cal-nav" data-nav="-1">‹</button>
+        <span class="cal-title">${MONTH_NAMES_PT[viewMonth]} ${viewYear}</span>
+        <button type="button" class="cal-nav" data-nav="1">›</button>
+      </div>
+      <div class="cal-weekdays">${WEEKDAY_LETTERS_PT.map((w) => `<span>${w}</span>`).join('')}</div>
+      <div class="cal-grid">
+        ${weeks.map((week) => week.map((d) => {
+          if (!d) return '<span class="cal-day empty"></span>';
+          const inRange = !opts.singleDate && lo && hi && d >= lo && d <= hi;
+          const isEdge = d === sel.start || d === sel.end;
+          const isToday = d === todayStr();
+          return `<button type="button" class="cal-day ${inRange ? 'in-range' : ''} ${isEdge ? 'edge' : ''} ${isToday ? 'today' : ''}" data-day="${d}">${Number(d.slice(8, 10))}</button>`;
+        }).join('')).join('')}
+      </div>
+      <div class="cal-footer">
+        <span class="cal-range-label">${opts.singleDate ? fmt(sel.start || sel.end) : `${fmt(lo)} → ${fmt(hi)}`}</span>
+        <button type="button" class="cal-clear" id="cal-clear">Limpar</button>
+      </div>
+    `;
+    pop.querySelectorAll('[data-nav]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        viewMonth += Number(btn.dataset.nav);
+        if (viewMonth < 0) { viewMonth = 11; viewYear--; }
+        if (viewMonth > 11) { viewMonth = 0; viewYear++; }
+        draw();
+      };
+    });
+    pop.querySelectorAll('[data-day]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const day = btn.dataset.day;
+        if (opts.singleDate) {
+          sel = { start: day, end: day };
+          onChange({ ...sel });
+          closeCalendarPopover();
+          return;
+        }
+        if (!sel.start || (sel.start && sel.end)) {
+          sel = { start: day, end: '' };
+        } else if (day < sel.start) {
+          sel = { start: day, end: sel.start };
+        } else {
+          sel = { start: sel.start, end: day };
+        }
+        onChange({ ...sel });
+        draw();
+      };
+    });
+    const clearBtn = document.getElementById('cal-clear');
+    if (clearBtn) clearBtn.onclick = (e) => {
+      e.stopPropagation();
+      sel = { start: '', end: '' };
+      onChange({ ...sel });
+      draw();
+    };
+  }
+
+  draw();
+  place();
+  setTimeout(() => {
+    document.addEventListener('click', function outside(e) {
+      if (!pop.contains(e.target) && e.target !== anchorEl && !anchorEl.contains(e.target)) {
+        closeCalendarPopover();
+        document.removeEventListener('click', outside);
+      }
+    });
+  }, 0);
+}
+
+// Rótulo pra botão de campo que abre o calendário (usado em qualquer lugar que hoje tem um par de <input type=date>)
+function calRangeLabel(start, end, placeholder) {
+  if (!start && !end) return placeholder;
+  if (start && end && start !== end) return `${formatDateBR(start)} → ${formatDateBR(end)}`;
+  return formatDateBR(start || end);
 }
 
 // Calcula o intervalo [start, end] (strings ISO yyyy-mm-dd) para um período do dashboard.
@@ -756,14 +899,39 @@ function computeSocialMediaQueue() {
 // (3) postagens programadas (cards que ele levou até "Programado"/"Postado").
 const SOCIAL_REPORT_FORMATS = { quinzenal: 'Relatório quinzenal', mensal: 'Relatório mensal' };
 const SOCIAL_PERFORMANCE_DAYS = 30;
+const SOCIAL_QUEUE_DAYS = 7;
+
+// Time do papel "Social Media" — usado tanto na métrica histórica quanto na fila de trabalho.
+function socialMediaTeamNames() {
+  return activeTeamNames().filter((n) => {
+    const member = state.team.find((t) => t.name === n);
+    return member && (member.roles || []).includes('Social Media');
+  });
+}
+
+// Fila de trabalho do Social Media — accionável ("o que eu preciso fazer agora"), pra frente,
+// bem diferente da métrica histórica acima. Henrique: "social media é um mundo à parte" — não
+// é card por card do designer/filmmaker, é: quanto tenho pra criar, quanto pra aprovar com
+// cliente, quanto já tá pronto e só falta programar.
+function computeSocialMediaWorkQueue() {
+  const today = todayStr();
+  const soon = addDaysStr(today, SOCIAL_QUEUE_DAYS);
+  return socialMediaTeamNames().map((name) => {
+    const mine = state.demands.filter((d) => d.responsible === name);
+    const aCriar = mine.filter((d) => d.status === 'em_briefing').length;
+    const aAprovarCliente = mine.filter((d) => ['aprovacao_briefing', 'em_aprovacao_cliente'].includes(d.status)).length;
+    const aProgramar = mine.filter((d) => d.status === 'aprovado').length;
+    const vencendo = mine.filter((d) => !DONE_STATUSES.includes(d.status) && d.prazo_final && d.prazo_final >= today && d.prazo_final <= soon).length;
+    const atrasadas = mine.filter((d) => !DONE_STATUSES.includes(d.status) && d.prazo_final && d.prazo_final < today).length;
+    return { name, aCriar, aAprovarCliente, aProgramar, vencendo, atrasadas };
+  }).filter((r) => r.aCriar || r.aAprovarCliente || r.aProgramar || r.vencendo || r.atrasadas)
+    .sort((a, b) => (b.atrasadas + b.vencendo) - (a.atrasadas + a.vencendo));
+}
 
 function computeSocialMediaPerformance() {
   const today = todayStr();
   const periodStart = addDaysStr(today, -SOCIAL_PERFORMANCE_DAYS);
-  const socialNames = activeTeamNames().filter((n) => {
-    const member = state.team.find((t) => t.name === n);
-    return member && (member.roles || []).includes('Social Media');
-  });
+  const socialNames = socialMediaTeamNames();
   return socialNames.map((name) => {
     const mine = state.demands.filter((d) => d.responsible === name);
     const criacoes = mine.filter((d) => (d.created_at || '').slice(0, 10) >= periodStart).length;
@@ -1083,6 +1251,7 @@ function renderDashboard(main) {
   const socialQueue = computeSocialMediaQueue();
   const maxSocialQueue = socialQueue.length ? Math.max(...socialQueue.map((s) => s.count)) : 0;
   const socialPerformance = computeSocialMediaPerformance();
+  const socialQueuePersonal = computeSocialMediaWorkQueue();
 
   const formatCounts = (() => {
     const counts = {};
@@ -1127,9 +1296,7 @@ function renderDashboard(main) {
         <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Personalizado</option>
       </select>
       ${f.period === 'custom' ? `
-        <input type="date" id="dash-filter-start" value="${f.customStart || ''}" />
-        <span style="color:var(--text-dim);font-size:12px">até</span>
-        <input type="date" id="dash-filter-end" value="${f.customEnd || ''}" />
+        <button type="button" class="field-multi-btn" id="dash-filter-cal-btn">📅 ${calRangeLabel(f.customStart, f.customEnd, '+ escolher período')}</button>
       ` : ''}
       ${(f.clientId || f.responsible || f.period !== 'all') ? '<button class="btn secondary small" id="dash-filter-clear">Limpar filtros</button>' : ''}
     </div>
@@ -1286,6 +1453,45 @@ function renderDashboard(main) {
       </div>
     </div>
 
+    <div style="margin:8px 0 12px">
+      <h2 style="margin:0">🧭 Social Media — um mundo à parte</h2>
+      <p class="dash-panel-sub" style="margin-top:4px">Não é card por card do designer/filmmaker: aqui é fila de trabalho e produtividade de quem cuida do social media.</p>
+    </div>
+
+    <div class="dash-panel dash-panel-wide" style="margin-bottom:20px">
+      <h2>📋 O que cada pessoa precisa fazer agora</h2>
+      <p class="dash-panel-sub">
+        Fila accionável, olhando pra frente: quanto tem pra criar (briefing), quanto tá esperando aprovação do
+        cliente, quanto já foi aprovado e só falta programar, e quanto vence nos próximos ${SOCIAL_QUEUE_DAYS} dias.
+      </p>
+      ${socialQueuePersonal.length ? `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Pessoa</th>
+              <th>A criar (briefing)</th>
+              <th>Aguardando aprovação do cliente</th>
+              <th>Pronto — só programar</th>
+              <th>Vence em ${SOCIAL_QUEUE_DAYS} dias</th>
+              <th>Atrasadas</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${socialQueuePersonal.map((r) => `
+              <tr>
+                <td class="td-title">${escapeHtml(r.name)}</td>
+                <td>${r.aCriar || '—'}</td>
+                <td>${r.aAprovarCliente || '—'}</td>
+                <td>${r.aProgramar || '—'}</td>
+                <td>${r.vencendo || '—'}</td>
+                <td>${r.atrasadas ? `<span class="tag tag-red">${r.atrasadas}</span>` : '—'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : '<div class="empty-state">Fila do Social Media vazia no momento. 🎉</div>'}
+    </div>
+
     <div class="dash-panel dash-panel-wide" style="margin-bottom:20px">
       <h2>🎯 Performance do Social Media</h2>
       <p class="dash-panel-sub">
@@ -1360,15 +1566,13 @@ function renderDashboard(main) {
     state.dashboardFilters.period = e.target.value;
     renderDashboard(main);
   };
-  const startInput = document.getElementById('dash-filter-start');
-  if (startInput) startInput.onchange = (e) => {
-    state.dashboardFilters.customStart = e.target.value;
-    renderDashboard(main);
-  };
-  const endInput = document.getElementById('dash-filter-end');
-  if (endInput) endInput.onchange = (e) => {
-    state.dashboardFilters.customEnd = e.target.value;
-    renderDashboard(main);
+  const dashCalBtn = document.getElementById('dash-filter-cal-btn');
+  if (dashCalBtn) dashCalBtn.onclick = (e) => {
+    openCalendarPopover(e.currentTarget, { start: state.dashboardFilters.customStart, end: state.dashboardFilters.customEnd }, (next) => {
+      state.dashboardFilters.customStart = next.start;
+      state.dashboardFilters.customEnd = next.end;
+      renderDashboard(main);
+    });
   };
   const clearBtn = document.getElementById('dash-filter-clear');
   if (clearBtn) clearBtn.onclick = () => {
@@ -2184,7 +2388,7 @@ function renderFilterBar(container, onChange) {
       cb.onchange = () => {
         if (cb.checked) state.filters[pillDef.key].add(cb.value);
         else state.filters[pillDef.key].delete(cb.value);
-        renderDemandas(document.getElementById('main'));
+        rerender();
       };
     });
     const searchInput = document.getElementById('filter-search-input');
@@ -2199,21 +2403,23 @@ function renderFilterBar(container, onChange) {
       setTimeout(() => searchInput.focus(), 0);
     }
   } else {
+    // Range de data: clica início e fim direto no calendário, num popover só (em vez de dois campos soltos).
     slot.innerHTML = `
       <div class="filter-popover range" style="left:${rect.left - containerRect.left}px; top:${rect.bottom - containerRect.top + 6}px">
-        <label>De</label>
-        <input type="date" id="range-from" value="${state.filters[pillDef.fromKey] || ''}" />
-        <label>Até</label>
-        <input type="date" id="range-to" value="${state.filters[pillDef.toKey] || ''}" />
+        <label>${pillDef.label}</label>
+        <button type="button" class="field-multi-btn" id="range-cal-btn" style="width:100%">
+          📅 ${calRangeLabel(state.filters[pillDef.fromKey], state.filters[pillDef.toKey], '+ escolher período')}
+        </button>
       </div>
     `;
-    document.getElementById('range-from').onchange = (e) => {
-      state.filters[pillDef.fromKey] = e.target.value;
-      renderDemandas(document.getElementById('main'));
-    };
-    document.getElementById('range-to').onchange = (e) => {
-      state.filters[pillDef.toKey] = e.target.value;
-      renderDemandas(document.getElementById('main'));
+    document.getElementById('range-cal-btn').onclick = (e) => {
+      const btn = e.currentTarget;
+      openCalendarPopover(btn, { start: state.filters[pillDef.fromKey], end: state.filters[pillDef.toKey] }, (next) => {
+        state.filters[pillDef.fromKey] = next.start;
+        state.filters[pillDef.toKey] = next.end;
+        btn.innerHTML = `📅 ${calRangeLabel(next.start, next.end, '+ escolher período')}`;
+        rerender();
+      });
     };
   }
 }
@@ -2260,7 +2466,7 @@ function csvEscape(value) {
 }
 
 function exportDemandsCSV(list) {
-  const headers = ['Demanda', 'Cliente', 'Status', 'Formato', 'Plataforma', 'Responsável', 'Prioridade', 'Prazo designer', 'Prazo final', 'Captação necessária', 'Visível ao cliente', 'Link'];
+  const headers = ['Demanda', 'Cliente', 'Status', 'Formato', 'Plataforma', 'Responsável', 'Prioridade', 'Complexidade', 'Prazo designer', 'Prazo final', 'Captação necessária', 'Visível ao cliente', 'Link'];
   const rows = list.map((d) => [
     d.title,
     clientName(d.client_id),
@@ -2269,6 +2475,7 @@ function exportDemandsCSV(list) {
     (d.platform || []).join(' / '),
     d.responsible || '',
     (PRIORIDADE_OPTIONS.find((p) => p.key === d.priority) || {}).label || d.priority || '',
+    (COMPLEXIDADE_OPTIONS.find((p) => p.key === d.complexity) || {}).label || '',
     formatDateBR(d.prazo_designer) || '',
     formatDateBR(d.prazo_final) || '',
     d.needs_capture ? 'Sim' : 'Não',
@@ -2502,6 +2709,8 @@ function renderDemandCard(d) {
     captureBadge = '<span class="tag tag-default">captação a definir</span>';
   }
   const urg = urgencyClass(d);
+  const complexityDef = d.complexity ? COMPLEXIDADE_OPTIONS.find((c) => c.key === d.complexity) : null;
+  const complexityBadge = complexityDef ? `<span class="tag tag-${complexityDef.color}" title="Complexidade">⚙️ ${complexityDef.label}</span>` : '';
   const respLine = (d.responsible_captacao || d.responsible_edicao) ? `
       <div class="sub sub-mini">
         <span>${d.responsible_captacao ? '🎬 ' + escapeHtml(d.responsible_captacao) : ''}${d.responsible_captacao && d.responsible_edicao ? ' · ' : ''}${d.responsible_edicao ? '✂️ ' + escapeHtml(d.responsible_edicao) : ''}</span>
@@ -2510,7 +2719,7 @@ function renderDemandCard(d) {
     <div class="demand-card ${urg}" data-id="${d.id}" draggable="true">
       <input type="text" class="title card-title-input" data-id="${d.id}" value="${escapeHtml(d.title)}" />
       ${tags ? `<div class="tag-group">${tags}</div>` : ''}
-      <div class="tag-group">${captureBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}${d.capture_link ? `<a href="${escapeHtml(d.capture_link)}" target="_blank" rel="noopener" class="tag tag-purple" onclick="event.stopPropagation()">🔗 material</a>` : ''}</div>
+      <div class="tag-group">${captureBadge}${complexityBadge}${d.briefing ? '<span class="tag tag-blue">📝 briefing</span>' : ''}${d.capture_link ? `<a href="${escapeHtml(d.capture_link)}" target="_blank" rel="noopener" class="tag tag-purple" onclick="event.stopPropagation()">🔗 material</a>` : ''}</div>
       <div class="sub">
         <span><span class="priority-dot ${d.priority}"></span>${escapeHtml(clientName(d.client_id))}${d.responsible ? ' · ' + escapeHtml(d.responsible) : ''}</span>
         <span class="${urg ? urg + '-text' : ''}">${formatDateBR(d.prazo_final) || formatDateBR(d.prazo_designer) || ''}</span>
@@ -2521,10 +2730,10 @@ function renderDemandCard(d) {
 }
 
 // ---------- Colunas da tabela: builtin + customizadas, reordenáveis ----------
-const BUILTIN_COLUMN_IDS = ['title', 'client', 'status', 'format', 'platform', 'responsible', 'priority', 'prazo_designer', 'prazo_final', 'captacao'];
+const BUILTIN_COLUMN_IDS = ['title', 'client', 'status', 'format', 'platform', 'responsible', 'priority', 'complexity', 'prazo_designer', 'prazo_final', 'captacao'];
 const BUILTIN_COLUMN_LABELS = {
   title: 'Demanda', client: 'Cliente', status: 'Status', format: 'Formato', platform: 'Plataforma',
-  responsible: 'Responsável', priority: 'Prioridade', prazo_designer: 'Prazo designer', prazo_final: 'Prazo final', captacao: 'Captação',
+  responsible: 'Responsável', priority: 'Prioridade', complexity: 'Complexidade', prazo_designer: 'Prazo designer', prazo_final: 'Prazo final', captacao: 'Captação',
 };
 
 function normalizeColumnOrder(saved, customColumns) {
@@ -2556,6 +2765,7 @@ function getCellValue(colId, d) {
   if (colId === 'format' || colId === 'platform') return (d[colId] || []).slice();
   if (colId === 'responsible') return d.responsible || '';
   if (colId === 'priority') return d.priority || '';
+  if (colId === 'complexity') return d.complexity || '';
   if (colId === 'prazo_designer') return d.prazo_designer || '';
   if (colId === 'prazo_final') return d.prazo_final || '';
   if (colId === 'captacao') return null; // campo composto, fora da seleção estilo Excel
@@ -2569,6 +2779,7 @@ function buildCellPayload(colId, value) {
   if (colId === 'format' || colId === 'platform') return { [colId]: Array.isArray(value) ? value.slice() : [] };
   if (colId === 'responsible') return { responsible: value };
   if (colId === 'priority') return { priority: value };
+  if (colId === 'complexity') return { complexity: value };
   if (colId === 'prazo_designer') return { prazo_designer: value };
   if (colId === 'prazo_final') return { prazo_final: value };
   return { custom_fields: { [colId]: value } };
@@ -2979,6 +3190,10 @@ function renderTableCell(colId, d, rowIndex, teamNames) {
     const pd = PRIORIDADE_OPTIONS.find((p) => p.key === d.priority) || {};
     return `<td ${attrs}><button class="cell-select-btn" data-id="${d.id}" data-field="priority">${escapeHtml(pd.label || d.priority)}</button></td>`;
   }
+  if (colId === 'complexity') {
+    const cd = COMPLEXIDADE_OPTIONS.find((p) => p.key === d.complexity);
+    return `<td ${attrs}><button class="cell-select-btn" data-id="${d.id}" data-field="complexity">${cd ? escapeHtml(cd.label) : '—'}</button></td>`;
+  }
   if (colId === 'prazo_designer') {
     return `<td ${attrs}><input type="date" class="cell-input" data-id="${d.id}" data-field="prazo_designer" value="${d.prazo_designer || ''}" /></td>`;
   }
@@ -3148,6 +3363,9 @@ function renderDemandTable(root, filtered) {
       } else if (field === 'priority') {
         options = PRIORIDADE_OPTIONS.map((p) => ({ value: p.key, label: p.label, color: p.color }));
         current = demand.priority;
+      } else if (field === 'complexity') {
+        options = [{ value: '', label: '— Sem definir —' }, ...COMPLEXIDADE_OPTIONS.map((p) => ({ value: p.key, label: p.label, color: p.color }))];
+        current = demand.complexity || '';
       }
       openInlineSinglePopover(btn, options, current, (val) => patchInline(demand, { [field]: val }));
     };
@@ -3429,6 +3647,15 @@ function openDemandModal(demand, defaultStatus) {
           </select>
         </div>
       </div>
+      <div class="two-col" style="margin-top:12px">
+        <div>
+          <label>Complexidade</label>
+          <select id="f-complexity">
+            <option value="" ${!demand.complexity ? 'selected' : ''}>— Sem definir —</option>
+            ${COMPLEXIDADE_OPTIONS.map((p) => `<option value="${p.key}" ${demand.complexity === p.key ? 'selected' : ''}>${p.label}</option>`).join('')}
+          </select>
+        </div>
+      </div>
     </div>
 
     <div class="field-section">
@@ -3437,18 +3664,12 @@ function openDemandModal(demand, defaultStatus) {
         Precisa de captação
       </label>
       <div id="capture-date-wrap" style="${demand.needs_capture === false ? 'display:none' : ''};margin-top:8px">
-        <input type="date" id="f-capture-date" value="${demand.capture_date || ''}" />
+        <button type="button" class="field-multi-btn" id="f-capture-date-btn">📅 ${calRangeLabel(demand.capture_date, demand.capture_date, '+ escolher data de captação')}</button>
         <input type="text" id="f-capture-link" placeholder="Link do material de captação (drive, etc.)" value="${escapeHtml(demand.capture_link || '')}" style="width:100%;margin-top:8px" />
       </div>
-      <div class="two-col" style="margin-top:12px">
-        <div>
-          <label>Prazo designer</label>
-          <input type="date" id="f-prazo-designer" value="${demand.prazo_designer || ''}" />
-        </div>
-        <div>
-          <label>Entrega final</label>
-          <input type="date" id="f-prazo-final" value="${demand.prazo_final || ''}" />
-        </div>
+      <div style="margin-top:12px">
+        <label>Prazo (início do designer → entrega final)</label>
+        <button type="button" class="field-multi-btn" id="f-prazo-btn">📅 ${calRangeLabel(demand.prazo_designer, demand.prazo_final, '+ escolher início e fim')}</button>
       </div>
     </div>
 
@@ -3551,19 +3772,35 @@ function openDemandModal(demand, defaultStatus) {
   document.getElementById('f-status').onchange = (e) => patch({ status: e.target.value });
   document.getElementById('f-priority').onchange = (e) => patch({ priority: e.target.value });
   document.getElementById('f-forecast').onchange = (e) => patch({ forecast: e.target.value });
+  document.getElementById('f-complexity').onchange = (e) => patch({ complexity: e.target.value });
   document.getElementById('f-refacao').onchange = (e) => patch({ refacao: e.target.value });
   document.getElementById('f-resp').onchange = (e) => patch({ responsible: e.target.value });
   document.getElementById('f-resp-captacao').onchange = (e) => patch({ responsible_captacao: e.target.value });
   document.getElementById('f-resp-edicao').onchange = (e) => patch({ responsible_edicao: e.target.value });
   document.getElementById('f-link').addEventListener('input', (e) => patchDebounced({ link: e.target.value.trim() }));
   document.getElementById('f-capture-link').addEventListener('input', (e) => patchDebounced({ capture_link: e.target.value.trim() }));
-  document.getElementById('f-prazo-designer').onchange = (e) => patch({ prazo_designer: e.target.value });
-  document.getElementById('f-prazo-final').onchange = (e) => patch({ prazo_final: e.target.value });
+  document.getElementById('f-prazo-btn').onclick = (e) => {
+    const btn = e.currentTarget;
+    openCalendarPopover(btn, { start: demand.prazo_designer, end: demand.prazo_final }, (next) => {
+      demand.prazo_designer = next.start;
+      demand.prazo_final = next.end;
+      btn.innerHTML = `📅 ${calRangeLabel(next.start, next.end, '+ escolher início e fim')}`;
+      patch({ prazo_designer: next.start, prazo_final: next.end });
+    });
+  };
   document.getElementById('f-needs-capture').onchange = (e) => {
     document.getElementById('capture-date-wrap').style.display = e.target.checked ? '' : 'none';
     patch({ needs_capture: e.target.checked, capture_date: e.target.checked ? demand.capture_date : '' });
   };
-  document.getElementById('f-capture-date').onchange = (e) => patch({ capture_date: e.target.value });
+  const captureDateBtn = document.getElementById('f-capture-date-btn');
+  if (captureDateBtn) captureDateBtn.onclick = (e) => {
+    const btn = e.currentTarget;
+    openCalendarPopover(btn, { start: demand.capture_date, end: demand.capture_date }, (next) => {
+      demand.capture_date = next.start || next.end;
+      btn.innerHTML = `📅 ${calRangeLabel(demand.capture_date, demand.capture_date, '+ escolher data de captação')}`;
+      patch({ capture_date: demand.capture_date });
+    }, { singleDate: true });
+  };
 
   document.getElementById('f-format-btn').onclick = (e) => {
     openInlineMultiPopover(e.currentTarget, formatOptionNames(), demand.format, (next) => {
@@ -3743,9 +3980,7 @@ function renderMinhasDemandas(main) {
         <option value="custom" ${f.period === 'custom' ? 'selected' : ''}>Personalizado</option>
       </select>
       ${f.period === 'custom' ? `
-        <input type="date" id="minhas-filter-start" value="${f.customStart || ''}" />
-        <span style="color:var(--text-dim);font-size:12px">até</span>
-        <input type="date" id="minhas-filter-end" value="${f.customEnd || ''}" />
+        <button type="button" class="field-multi-btn" id="minhas-filter-cal-btn">📅 ${calRangeLabel(f.customStart, f.customEnd, '+ escolher período')}</button>
       ` : ''}
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-dim);cursor:pointer">
         <input type="checkbox" id="minhas-filter-done" ${f.showDone ? 'checked' : ''} /> Mostrar concluídas
@@ -3766,10 +4001,14 @@ function renderMinhasDemandas(main) {
 
   const periodSel = document.getElementById('minhas-filter-period');
   if (periodSel) periodSel.onchange = (e) => { state.minhasDemandasFilters.period = e.target.value; render(); };
-  const startInput = document.getElementById('minhas-filter-start');
-  if (startInput) startInput.onchange = (e) => { state.minhasDemandasFilters.customStart = e.target.value; render(); };
-  const endInput = document.getElementById('minhas-filter-end');
-  if (endInput) endInput.onchange = (e) => { state.minhasDemandasFilters.customEnd = e.target.value; render(); };
+  const minhasCalBtn = document.getElementById('minhas-filter-cal-btn');
+  if (minhasCalBtn) minhasCalBtn.onclick = (e) => {
+    openCalendarPopover(e.currentTarget, { start: state.minhasDemandasFilters.customStart, end: state.minhasDemandasFilters.customEnd }, (next) => {
+      state.minhasDemandasFilters.customStart = next.start;
+      state.minhasDemandasFilters.customEnd = next.end;
+      render();
+    });
+  };
   const doneCheck = document.getElementById('minhas-filter-done');
   if (doneCheck) doneCheck.onchange = (e) => { state.minhasDemandasFilters.showDone = e.target.checked; render(); };
   const clearBtn = document.getElementById('minhas-filter-clear');

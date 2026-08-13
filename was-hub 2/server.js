@@ -458,6 +458,132 @@ function createSession(tenantId, userId) {
   return token;
 }
 
+function decodeBase64Url(value) {
+  const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padding = normalized.length % 4 ? '='.repeat(4 - (normalized.length % 4)) : '';
+  return Buffer.from(normalized + padding, 'base64');
+}
+
+function verifySsoToken(token) {
+  const secret = process.env.WAS_SSO_SECRET;
+  if (!secret) return { status: 503, error: 'SSO não configurado.' };
+  const parts = String(token || '').split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { status: 401, error: 'Token SSO inválido.' };
+  }
+
+  let actualSignature;
+  try {
+    actualSignature = decodeBase64Url(parts[1]);
+  } catch (e) {
+    return { status: 401, error: 'Token SSO inválido.' };
+  }
+  const expectedSignature = crypto.createHmac('sha256', secret).update(parts[0]).digest();
+  if (actualSignature.length !== expectedSignature.length ||
+      !crypto.timingSafeEqual(actualSignature, expectedSignature)) {
+    return { status: 401, error: 'Assinatura SSO inválida.' };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(decodeBase64Url(parts[0]).toString('utf8'));
+  } catch (e) {
+    return { status: 401, error: 'Token SSO inválido.' };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const requiredStrings = ['organizationId', 'organizationName', 'userId', 'name', 'email', 'role', 'nonce'];
+  if (
+    payload.v !== 1 ||
+    !Number.isInteger(payload.iat) ||
+    !Number.isInteger(payload.exp) ||
+    payload.iat > now + 60 ||
+    payload.exp <= now ||
+    payload.exp - payload.iat > 120 ||
+    now - payload.iat > 120 ||
+    requiredStrings.some((key) => typeof payload[key] !== 'string' || !payload[key].trim())
+  ) {
+    return { status: 401, error: 'Token SSO expirado ou incompleto.' };
+  }
+  return { payload };
+}
+
+function upsertSsoIdentity(root, payload) {
+  const tenantId = payload.organizationId === 'was-default'
+    ? 'was'
+    : `main-${payload.organizationId}`;
+  let tenant = root.tenants[tenantId];
+
+  if (!tenant) {
+    tenant = emptyTenant(payload.organizationName.trim(), slugify(payload.organizationName));
+    tenant.id = tenantId;
+    root.tenants[tenantId] = tenant;
+  }
+  ensureTenantShape(tenant);
+  tenant.plan = 'agency';
+  if (tenantId !== 'was') tenant.name = payload.organizationName.trim();
+
+  const ssoSubject = `${payload.organizationId}:${payload.userId}`;
+  const email = payload.email.trim().toLowerCase();
+  let user = tenant.users.find((item) => item.ssoSubject === ssoSubject);
+  if (!user && email) {
+    user = tenant.users.find((item) => (item.email || '').trim().toLowerCase() === email);
+  }
+
+  const isAdmin = payload.role === 'owner' || payload.role === 'admin';
+  if (!user) {
+    const member = {
+      id: id(),
+      name: payload.name.trim(),
+      roles: ['Coringa'],
+      active: true,
+      created_at: new Date().toISOString(),
+    };
+    user = {
+      id: id(),
+      name: payload.name.trim(),
+      email,
+      passwordHash: hashPassword(crypto.randomBytes(48).toString('hex')),
+      role: isAdmin ? 'admin' : 'member',
+      team_member_id: member.id,
+      visibleClientIds: 'all',
+      ssoSubject,
+      created_at: new Date().toISOString(),
+    };
+    tenant.team.push(member);
+    tenant.users.push(user);
+  } else {
+    user.name = payload.name.trim();
+    user.email = email;
+    user.role = isAdmin ? 'admin' : 'member';
+    user.ssoSubject = ssoSubject;
+    user.revokedByTeamDelete = false;
+    if (user.visibleClientIds === undefined) user.visibleClientIds = 'all';
+
+    let member = user.team_member_id
+      ? tenant.team.find((item) => item.id === user.team_member_id)
+      : null;
+    if (!member) {
+      member = {
+        id: id(),
+        name: user.name,
+        roles: ['Coringa'],
+        active: true,
+        created_at: new Date().toISOString(),
+      };
+      tenant.team.push(member);
+      user.team_member_id = member.id;
+    } else {
+      member.name = user.name;
+      member.active = true;
+      if (!Array.isArray(member.roles) || member.roles.length === 0) member.roles = ['Coringa'];
+    }
+  }
+
+  saveDB(root);
+  return { tenant, user };
+}
+
 // ---- Autenticação por chave de API (pro MCP e outras integrações sem cookie de sessão) ----
 function getBearerToken(req) {
   const header = req.headers['authorization'] || '';
@@ -787,6 +913,16 @@ async function handleAPI(req, res, pathname, query) {
 
     // ---- AUTH (login / logout / cadastro público / usuário atual) ----
     if (resource === 'auth') {
+      if (resId === 'sso' && method === 'POST') {
+        const body = await readBody(req);
+        const verified = verifySsoToken(body.token);
+        if (verified.error) return sendJSON(res, verified.status, { error: verified.error });
+
+        const identity = upsertSsoIdentity(root, verified.payload);
+        const token = createSession(identity.tenant.id, identity.user.id);
+        setSessionCookie(res, token);
+        return sendJSON(res, 200, { user: publicUser(identity.user, identity.tenant) });
+      }
       if (resId === 'login' && method === 'POST') {
         const rateKey = clientIp(req);
         const block = checkLoginRateLimit(rateKey);
@@ -845,6 +981,9 @@ async function handleAPI(req, res, pathname, query) {
         return sendJSON(res, 200, { ok: true });
       }
       if (resId === 'signup' && method === 'POST') {
+        if (process.env.ALLOW_PUBLIC_SIGNUP !== 'true') {
+          return sendJSON(res, 403, { error: 'Cadastro público desativado. Solicite acesso ao administrador da agência.' });
+        }
         const body = await readBody(req);
         const companyName = (body.companyName || '').trim();
         const userName = (body.userName || '').trim();
